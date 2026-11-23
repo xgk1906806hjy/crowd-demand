@@ -1,0 +1,15 @@
+node_modules
+.next
+.next.old.*
+.git
+.gitignore
+*.log
+coverage
+tests
+docs
+README.md
+AGENTS.md
+tsconfig.tsbuildinfo
+.env
+.env.local
+.vscode

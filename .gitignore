@@ -1,0 +1,40 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# env（.env.example 保留）
+.env
+.env*.local
+.env.production
+deploy/.env.production
+
+# build 缓存备份（构建脚本会用 mv 移走旧 .next）
+.next.old.*
+
+# logs
+*.log
+npm-debug.log*
+
+# misc
+.DS_Store
+*.pem
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# test
+/coverage
+/playwright-report
+/test-results
+
+# vercel
+.vercel

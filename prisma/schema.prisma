@@ -1,0 +1,386 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 枚举：状态机与角色（集中定义，禁止在 UI 层判断业务状态）
+// ============================================================
+
+enum UserRole {
+  REQUESTER   // 需求发起者
+  BACKER      // 支持者
+  BUILDER     // 开发者
+  OPERATOR    // 运营方
+}
+
+enum KycStatus {
+  NONE
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum NeedStatus {
+  DRAFT       // 草稿
+  COLLECTING  // 征集中（发布后）
+  PLEDGING    // 承诺中（达到票数门槛）
+  BIDDING     // 竞标中（承诺达标，资金锁定）
+  IN_PROGRESS // 开发中
+  ACCEPTING   // 验收中
+  COMPLETED   // 已完成
+  FAILED      // 已流拍
+  REFUNDED    // 已退款
+}
+
+enum PledgeStatus {
+  FROZEN      // 已冻结在托管
+  LOCKED      // 达标后锁定
+  RELEASED    // 已放款
+  REFUNDED    // 已退还
+}
+
+enum ProposalStatus {
+  SUBMITTED
+  SELECTED    // 中标
+  REJECTED
+  WITHDRAWN
+}
+
+enum MilestoneStatus {
+  PENDING
+  SUBMITTED
+  ACCEPTED
+  DISPUTED
+  RELEASED
+}
+
+enum LedgerDirection {
+  DEBIT       // 借：资金流出账户
+  CREDIT      // 贷：资金流入账户
+}
+
+enum LedgerAccountType {
+  BACKER      // 支持者承诺账户（虚拟）
+  ESCROW      // 平台托管账户（虚拟，对应持牌机构账户）
+  BUILDER     // 开发者收款账户（虚拟）
+}
+
+enum AuditAction {
+  AUTH
+  ROLE
+  KYC
+  NEED
+  VOTE
+  PLEDGE
+  LEDGER
+  PROPOSAL
+  MILESTONE
+  PAYOUT
+  REFUND
+  ADMIN
+}
+
+// ============================================================
+// 用户与信任（F01 / F02 / F03）
+// ============================================================
+
+model User {
+  id              String    @id @default(cuid())
+  phone           String?   @unique
+  email           String?   @unique
+  nickname        String?
+  avatarUrl       String?
+  roles           UserRole[] @default([BACKER])
+  kycStatus       KycStatus @default(NONE)
+  kycIdNumberHash String?   @unique       // 已实名身份证号 HMAC，一人一号（F02）
+  reputationScore Int       @default(0)   // 信誉分（F03）
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  kycRecords      KycRecord[]
+  needs           Need[]          @relation("NeedRequester")
+  votes           Vote[]
+  pledges         Pledge[]
+  proposals       Proposal[]      @relation("ProposalBuilder")
+  auditLogs       AuditLog[]
+
+  @@index([phone])
+  @@index([email])
+}
+
+model KycRecord {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id])
+  realName     String
+  idNumberHash String     // 身份证号哈希，禁止明文存储
+  provider     String     // 适配器标识：mock / third-party
+  status       KycStatus
+  reason       String?
+  createdAt    DateTime   @default(now())
+
+  @@index([userId])
+}
+
+model VerificationCode {
+  id        String   @id @default(cuid())
+  target    String   // 手机号或邮箱
+  channel   String   // sms / email
+  codeHash  String   // 验证码哈希，禁止明文
+  purpose   String   // LOGIN / KYC
+  expiresAt DateTime
+  consumedAt DateTime?
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([target, purpose])
+}
+
+// ============================================================
+// 需求与投票（F04 / F05 / F06 / F07 / F08）
+// ============================================================
+
+model Need {
+  id            String     @id @default(cuid())
+  requesterId   String
+  requester     User       @relation("NeedRequester", fields: [requesterId], references: [id])
+  title         String
+  description   String     @db.Text
+  targetAudience String?
+  expectedForm  String?
+  attachments   String[]   @default([])  // OSS 对象 key
+  status        NeedStatus @default(DRAFT)
+  voteThreshold Int        @default(100) // 进入承诺期的票数门槛
+  voteCount     Int        @default(0)   // 冗余票数，榜单排序用（F07/F08）
+  targetAmount  BigInt     @default(0)   // 承诺目标金额（分）
+  pledgedAmount BigInt     @default(0)   // 已承诺金额（分），由 F09 维护，榜单排序用
+  deadline      DateTime?
+  publishedAt   DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  votes         Vote[]
+  statusLogs    NeedStatusLog[]
+  pledges       Pledge[]
+  proposals     Proposal[]
+  projects      Project[]
+
+  @@index([status, publishedAt])
+  @@index([status, voteCount])
+  @@index([status, pledgedAmount])
+  @@index([requesterId])
+}
+
+model NeedStatusLog {
+  id         String     @id @default(cuid())
+  needId     String
+  need       Need       @relation(fields: [needId], references: [id])
+  fromStatus NeedStatus?
+  toStatus   NeedStatus
+  reason     String?
+  actorId    String?    // 操作者，系统流转时为 null
+  createdAt  DateTime   @default(now())
+
+  @@index([needId, createdAt])
+}
+
+model Vote {
+  id        String   @id @default(cuid())
+  needId    String
+  need      Need     @relation(fields: [needId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@unique([needId, userId])   // MVP 反刷票：一人一票
+  @@index([needId])
+}
+
+// ============================================================
+// 资金：承诺 / 托管 / 复式账本（F09 / F10 / F16 / F17 / F19）
+// 金额一律 BigInt 分；每笔资金操作带幂等键；账本流水不可物理删除
+// ============================================================
+
+model Pledge {
+  id            String        @id @default(cuid())
+  userId        String
+  user          User          @relation(fields: [userId], references: [id])
+  needId        String
+  need          Need          @relation(fields: [needId], references: [id])
+  amount        BigInt        // 承诺金额（分，整数）
+  status        PledgeStatus  @default(FROZEN)
+  idempotencyKey String       @unique  // 幂等键，防止重复扣款
+  paymentRef    String?       // 托管方流水号
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  ledgerEntries LedgerEntry[]
+
+  @@index([needId, status])
+  @@index([userId])
+}
+
+model LedgerEntry {
+  id            String            @id @default(cuid())
+  // 复式账本：每笔资金变动由一借一贷两条流水组成
+  accountType   LedgerAccountType
+  accountId     String            // 虚拟账户标识（用户ID / ESCROW / 开发者ID）
+  direction     LedgerDirection
+  amount        BigInt            // 分，恒为正数；方向决定增减
+  balanceAfter  BigInt            // 余额快照（分）
+  bizType       String            // PLEDGE / RELEASE / REFUND
+  bizId         String            // 业务单号（pledgeId / payoutId / refundId）
+  pledgeId      String?
+  pledge        Pledge?           @relation(fields: [pledgeId], references: [id])
+  idempotencyKey String            @unique
+  memo          String?
+  createdAt     DateTime          @default(now())
+
+  @@index([bizType, bizId])
+  @@index([accountType, accountId, createdAt])
+}
+
+model PaymentOrder {
+  id            String   @id @default(cuid())
+  idempotencyKey String  @unique
+  type          String   // FREEZE / RELEASE / REFUND
+  amount        BigInt   // 分
+  status        String   // PENDING / SUCCESS / FAILED
+  gateway       String   // mock / licensed
+  gatewayRef    String?
+  payload       Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([type, status])
+}
+
+// ============================================================
+// 提案 / 项目 / 里程碑 / 放款（F12 / F13 / F14 / F15 / F16 / F17）
+// ============================================================
+
+model Proposal {
+  id             String         @id @default(cuid())
+  needId         String
+  need           Need           @relation(fields: [needId], references: [id])
+  builderId      String
+  builder        User           @relation("ProposalBuilder", fields: [builderId], references: [id])
+  understanding  String         @db.Text   // 需求理解
+  spec           String         @db.Text   // 可执行规格
+  quote          BigInt         // 报价（分）
+  durationDays   Int            // 工期
+  pastCases      String?        @db.Text
+  status         ProposalStatus @default(SUBMITTED)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  milestones     Milestone[]
+  projects       Project[]
+  votes          ProposalVote[]
+
+  @@unique([needId, builderId])   // 一个开发者对一个需求只提交一份提案
+  @@index([needId, status])
+  @@index([builderId])
+}
+
+model ProposalVote {
+  id         String   @id @default(cuid())
+  proposalId String
+  proposal   Proposal @relation(fields: [proposalId], references: [id])
+  userId     String
+  weight     BigInt   // 依据承诺金额的投票权重（分）
+  createdAt  DateTime @default(now())
+
+  @@unique([proposalId, userId])
+}
+
+model Project {
+  id             String   @id @default(cuid())
+  needId         String   @unique   // 一个需求只能有一个中标项目
+  need           Need     @relation(fields: [needId], references: [id])
+  proposalId     String
+  proposal       Proposal @relation(fields: [proposalId], references: [id])
+  status         String   @default("IN_PROGRESS")
+  totalAmount    BigInt   // 托管总金额（分）
+  releasedAmount BigInt   @default(0) // 已释放（分）
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  milestones     Milestone[]
+  payouts        Payout[]
+
+  @@index([status])
+}
+
+model Milestone {
+  id           String          @id @default(cuid())
+  projectId    String
+  project      Project         @relation(fields: [projectId], references: [id])
+  proposalId   String
+  proposal     Proposal        @relation(fields: [proposalId], references: [id])
+  seq          Int             // 序号
+  title        String
+  deliverable  String          @db.Text
+  releaseRatio Int             // 放款比例（0-10000，万分比，避免小数）
+  releaseAmount BigInt         // 放款金额（分）
+  status       MilestoneStatus @default(PENDING)
+  submittedAt  DateTime?
+  acceptedAt   DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@unique([projectId, seq])
+}
+
+model Payout {
+  id            String   @id @default(cuid())
+  projectId     String
+  project       Project  @relation(fields: [projectId], references: [id])
+  milestoneId   String?
+  payeeId       String   // 开发者用户ID
+  amount        BigInt   // 分
+  status        String   @default("PENDING")
+  idempotencyKey String  @unique
+  gatewayRef    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([projectId])
+}
+
+// ============================================================
+// 后台：审计日志 / 举报（F18 / F19 / F20）
+// ============================================================
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  action    AuditAction
+  actorId   String?
+  actor     User?       @relation(fields: [actorId], references: [id])
+  target    String?     // 被操作对象（如 need:xxx）
+  detail    Json?
+  ip        String?
+  createdAt DateTime    @default(now())
+
+  @@index([action, createdAt])
+}
+
+model Report {
+  id          String   @id @default(cuid())
+  reporterId  String
+  targetType  String   // NEED / PROPOSAL / USER
+  targetId    String
+  reason      String   @db.Text
+  status      String   @default("PENDING") // PENDING / RESOLVED / REJECTED
+  handledBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, createdAt])
+}
