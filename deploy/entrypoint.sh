@@ -1,5 +1,7 @@
 #!/bin/sh
-# 容器启动入口：先同步数据库结构，再启动 Next standalone 服务
+# 容器启动入口：只等数据库就绪，然后启动 Next standalone 服务。
+# 数据库结构由 deploy/deploy.sh 用 prisma/init.sql 幂等应用，
+# 运行容器不依赖 Prisma CLI（standalone 镜像内没有完整 CLI 依赖树）。
 set -e
 
 echo "[entrypoint] waiting for database..."
@@ -17,14 +19,6 @@ p.\$queryRaw\`SELECT 1\`.then(() => process.exit(0)).catch(() => process.exit(1)
   sleep 2
 done
 echo "[entrypoint] database is up"
-
-if [ -d "prisma/migrations" ] && [ -n "$(ls -A prisma/migrations 2>/dev/null)" ]; then
-  echo "[entrypoint] applying migrations..."
-  node node_modules/prisma/build/index.js migrate deploy
-else
-  echo "[entrypoint] no migrations found, syncing schema with db push..."
-  node node_modules/prisma/build/index.js db push --skip-generate
-fi
 
 echo "[entrypoint] starting server..."
 exec node server.js

@@ -3,6 +3,11 @@ import { prisma } from "@/infrastructure/prisma/client";
 import { writeAudit } from "@/domain/shared/audit";
 import { ok, err, DomainError, type Result } from "@/domain/shared/result";
 import { canTransition, NEED_STATUS_LABEL } from "@/domain/need/state-machine";
+import { failNeedAndRefund } from "@/domain/pledge/lifecycle";
+import {
+  createPaymentGateway,
+  type PaymentGateway,
+} from "@/infrastructure/payment/gateway";
 
 /** 需求标题/正文长度约束：太短的描述无法让开发者报价。 */
 export const NEED_LIMITS = {
@@ -47,7 +52,10 @@ function textLength(s: string): number {
 }
 
 export class NeedService {
-  constructor(private readonly db: typeof prisma = prisma) {}
+  constructor(
+    private readonly db: typeof prisma = prisma,
+    private readonly gateway: PaymentGateway = createPaymentGateway(),
+  ) {}
 
   /** 发布需求（F04）：校验 → 落库 → 记录初始状态日志 → 自动授予需求发起者角色。 */
   async create(
@@ -206,6 +214,32 @@ export class NeedService {
         `不允许从「${NEED_STATUS_LABEL[need.status]}」流转到「${NEED_STATUS_LABEL[to]}」`,
         DomainError.INVALID_STATE,
       );
+    }
+
+    // 流拍必须带走退款：避免「状态置为已流拍、托管资金却留在账上」
+    if (to === NeedStatus.FAILED) {
+      const res = await failNeedAndRefund(needId, {
+        db: this.db,
+        gateway: this.gateway,
+        actorId: userId,
+        reason: reason?.trim() || "运营方终止需求",
+      });
+      if (!res.ok) return err(res.error, res.code);
+
+      await writeAudit({
+        action: "NEED",
+        actorId: userId,
+        target: `need:${needId}`,
+        detail: {
+          event: "NEED_FAILED",
+          from: need.status,
+          status: res.value.status,
+          refundedPledges: res.value.refunded.count,
+          refundedAmount: res.value.refunded.total.toString(),
+        },
+      });
+
+      return ok({ id: needId, status: res.value.status });
     }
 
     const data: Prisma.NeedUpdateInput = { status: to };

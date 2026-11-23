@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { KycStatus, MilestoneStatus, NeedStatus, PledgeStatus, ProposalStatus, UserRole } from "@prisma/client";
 import { MilestoneService } from "@/domain/milestone/service";
+import { MockPaymentGateway, type PaymentGateway } from "@/infrastructure/payment/gateway";
 import { makeFinanceDb } from "../helpers/finance-db";
 
 vi.mock("@/domain/shared/audit", () => ({ writeAudit: vi.fn().mockResolvedValue({}) }));
@@ -72,7 +73,35 @@ function seed() {
     },
   );
 
-  return { ctx, service: new MilestoneService(ctx.db as never) };
+  // 托管账户的真实来源：承诺时由支持者账户划入（账本余额护栏要求托管账户先有钱）
+  ctx.ledger.push(
+    {
+      id: "seed-escrow",
+      accountType: "ESCROW",
+      accountId: "ESCROW",
+      direction: "CREDIT",
+      amount: 100_000n,
+      balanceAfter: 100_000n,
+      bizType: "PLEDGE",
+      bizId: "seed",
+      idempotencyKey: "seed:in",
+      createdAt: new Date(),
+    },
+    {
+      id: "seed-backer",
+      accountType: "BACKER",
+      accountId: "u1",
+      direction: "DEBIT",
+      amount: 100_000n,
+      balanceAfter: -100_000n,
+      bizType: "PLEDGE",
+      bizId: "seed",
+      idempotencyKey: "seed:out",
+      createdAt: new Date(),
+    },
+  );
+
+  return { ctx, service: new MilestoneService(ctx.db as never, new MockPaymentGateway()) };
 }
 
 describe("MilestoneService 拆分与提交（F14）", () => {
@@ -173,7 +202,10 @@ describe("验收放款与结算（F15/F16/F17）", () => {
     }
     expect(ctx.milestones[0]?.status).toBe(MilestoneStatus.RELEASED);
     expect(ctx.payouts).toHaveLength(1);
-    expect(ctx.ledger).toHaveLength(2);
+    expect(ctx.payouts[0]?.gatewayRef).toBeTruthy();
+    expect(ctx.ledger.filter((e) => e.bizType === "RELEASE")).toHaveLength(2);
+    expect(ctx.orders.filter((o) => o.type === "RELEASE")).toHaveLength(1);
+    expect(ctx.orders.find((o) => o.type === "RELEASE")?.gateway).toBe("mock");
     expect(ctx.projects[0]?.releasedAmount).toBe(40_000n);
     expect(ctx.needs.get("n1")?.status).toBe(NeedStatus.ACCEPTING);
   });
@@ -218,5 +250,67 @@ describe("验收放款与结算（F15/F16/F17）", () => {
 
     expect(ctx.ledger.filter((e) => e.bizType === "REFUND")).toHaveLength(0);
     expect(ctx.needs.get("n1")?.status).toBe(NeedStatus.COMPLETED);
+  });
+});
+
+describe("验收顺序与外部通道容错（F15/F16）", () => {
+  let ctx: ReturnType<typeof seed>["ctx"];
+  let service: MilestoneService;
+
+  beforeEach(async () => {
+    const s = seed();
+    ctx = s.ctx;
+    service = s.service;
+    await service.plan("builder", "pj1", items);
+  });
+
+  it("前置节点未放款时不能跳级验收", async () => {
+    const last = ctx.milestones[1]?.id as string;
+    await service.submit("builder", last, "");
+
+    const res = await service.accept("owner", last);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe("INVALID_STATE");
+    expect(ctx.milestones[1]?.status).toBe(MilestoneStatus.SUBMITTED);
+    expect(ctx.ledger.filter((e) => e.bizType === "RELEASE")).toHaveLength(0);
+  });
+
+  it("外部放款通道失败：节点回到待验收且不记账", async () => {
+    const broken: PaymentGateway = {
+      provider: "broken",
+      freeze: async () => {
+        throw new Error("gateway down");
+      },
+      release: async () => {
+        throw new Error("gateway down");
+      },
+      refund: async () => {
+        throw new Error("gateway down");
+      },
+    };
+    const svc = new MilestoneService(ctx.db as never, broken);
+
+    const id = ctx.milestones[0]?.id as string;
+    await svc.submit("builder", id, "");
+
+    const res = await svc.accept("owner", id);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe("SERVICE_UNAVAILABLE");
+    expect(ctx.milestones[0]?.status).toBe(MilestoneStatus.SUBMITTED);
+    expect(ctx.payouts).toHaveLength(0);
+    expect(ctx.ledger.filter((e) => e.bizType === "RELEASE")).toHaveLength(0);
+  });
+
+  it("托管余额不足时拒绝放款并回滚验收状态", async () => {
+    ctx.ledger.length = 0; // 模拟托管侧资金缺失
+
+    const id = ctx.milestones[0]?.id as string;
+    await service.submit("builder", id, "");
+    const res = await service.accept("owner", id);
+
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe("SERVICE_UNAVAILABLE");
+    expect(ctx.milestones[0]?.status).toBe(MilestoneStatus.SUBMITTED);
+    expect(ctx.projects[0]?.releasedAmount).toBe(0n);
   });
 });

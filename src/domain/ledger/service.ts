@@ -27,7 +27,7 @@ export function builderAccount(userId: string): AccountRef {
   return { type: LedgerAccountType.BUILDER, id: userId };
 }
 
-type LedgerTx = Pick<Prisma.TransactionClient, "ledgerEntry">;
+type LedgerTx = Pick<Prisma.TransactionClient, "ledgerEntry" | "$queryRaw">;
 
 /** 计算账户当前余额（CREDIT - DEBIT）。 */
 export async function balanceOf(db: LedgerTx, account: AccountRef): Promise<bigint> {
@@ -40,6 +40,19 @@ export async function balanceOf(db: LedgerTx, account: AccountRef): Promise<bigi
       row.direction === LedgerDirection.CREDIT ? sum + row.amount : sum - row.amount,
     0n,
   );
+}
+
+/**
+ * 账本串行锁（AGENTS 第 2 节：托管账户行锁防并发超额）。
+ *
+ * 本系统所有资金划转都经过托管账户，因此用一把事务级咨询锁把「读余额 → 写余额快照」
+ * 串行化，避免两个并发事务读到同一份余额、写出互相覆盖的 balanceAfter。
+ * 锁在事务提交/回滚时自动释放，不跨请求持有。
+ */
+export async function lockLedger(tx: LedgerTx): Promise<void> {
+  // 注意：pg_advisory_xact_lock 返回 void，Prisma 无法反序列化 void 列（P2010），
+  // 因此用子查询包一层并投影出 int 列，只取副作用的锁语义。
+  await tx.$queryRaw`SELECT 1::int AS locked FROM (SELECT pg_advisory_xact_lock(hashtext('crowd-demand:ledger'))) AS _lock`;
 }
 
 export interface TransferInput {
@@ -63,8 +76,15 @@ export async function postTransfer(tx: LedgerTx, input: TransferInput): Promise<
     throw new Error("记账金额必须大于 0");
   }
 
+  await lockLedger(tx);
+
   const fromBalance = await balanceOf(tx, input.from);
   const toBalance = await balanceOf(tx, input.to);
+
+  // 托管账户不允许透支：放款/退款总额不得超过已冻结在托管中的资金
+  if (input.from.type === LedgerAccountType.ESCROW && fromBalance < input.amount) {
+    throw new Error("托管账户余额不足，拒绝划出");
+  }
 
   await tx.ledgerEntry.create({
     data: {

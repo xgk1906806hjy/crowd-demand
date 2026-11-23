@@ -6,6 +6,13 @@ import { MilestoneService, type PlanItem } from "@/domain/milestone/service";
 
 export const dynamic = "force-dynamic";
 
+/** GET /api/projects/[id]/milestones —— 里程碑总览（F14）。 */
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const { id } = await ctx.params;
+  const session = await getSession();
+  return toResponse(await new MilestoneService().getByProject(id, session?.userId ?? null));
+}
+
 /** POST /api/projects/[id]/milestones —— 拆分里程碑（F14）。 */
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const session = await getSession();

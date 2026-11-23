@@ -1,13 +1,13 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { getSession } from "@/lib/auth";
+import { getSessionUser } from "@/lib/auth";
 import { UserRole } from "@prisma/client";
 
-/** 运营后台布局：仅 OPERATOR 可进入。 */
+/** 运营后台布局：仅 OPERATOR 可进入（以数据库最新角色为准）。 */
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
-  const session = await getSession();
-  if (!session) redirect("/login?next=/admin");
-  if (!session.roles.includes(UserRole.OPERATOR)) redirect("/console");
+  const user = await getSessionUser();
+  if (!user) redirect("/login?next=/admin");
+  if (!user.roles.includes(UserRole.OPERATOR)) redirect("/console");
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-8">

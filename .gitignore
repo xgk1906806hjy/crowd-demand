@@ -36,5 +36,8 @@ next-env.d.ts
 /playwright-report
 /test-results
 
+# 本地附件存储（生产请挂载独立卷）
+/storage
+
 # vercel
 .vercel

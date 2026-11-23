@@ -5,9 +5,13 @@ import {
   builderAccount,
   postTransfer,
 } from "@/domain/ledger/service";
+import { transitionNeedInTx } from "@/domain/need/transition";
 
 /**
  * 放款与结算（F16/F17）—— 只接受事务客户端，保证与验收状态同事务提交。
+ *
+ * 外部资金划转（PaymentGateway）由调用方在事务外按幂等 reference 完成，
+ * 这里只负责「记账 + 业务落库 + 支付单留痕」，不直接调用支付 SDK。
  */
 
 export interface ReleaseInput {
@@ -16,9 +20,13 @@ export interface ReleaseInput {
   needId: string;
   payeeId: string;
   amount: bigint;
+  /** 托管方放款流水号（外部调用成功后的回执） */
+  gatewayRef: string | null;
+  /** 实际支付适配器标识，禁止硬编码 mock */
+  provider: string;
 }
 
-/** 里程碑放款：托管 → 开发者，写 Payout 与账本，项目已释放金额自增。 */
+/** 里程碑放款：托管 → 开发者，写 Payout、支付单与账本，项目已释放金额自增。 */
 export async function releaseMilestoneInTx(
   tx: Prisma.TransactionClient,
   input: ReleaseInput,
@@ -45,9 +53,25 @@ export async function releaseMilestoneInTx(
       amount: input.amount,
       status: "SUCCESS",
       idempotencyKey: key,
-      gatewayRef: null,
+      gatewayRef: input.gatewayRef,
     },
     select: { id: true },
+  });
+
+  await tx.paymentOrder.create({
+    data: {
+      idempotencyKey: key,
+      type: "RELEASE",
+      amount: input.amount,
+      status: "SUCCESS",
+      gateway: input.provider,
+      gatewayRef: input.gatewayRef,
+      payload: {
+        projectId: input.projectId,
+        milestoneId: input.milestoneId,
+        payeeId: input.payeeId,
+      },
+    },
   });
 
   await tx.milestone.update({
@@ -63,6 +87,11 @@ export async function releaseMilestoneInTx(
   return payout.id;
 }
 
+export interface RefundReceipt {
+  pledgeId: string;
+  ref: string | null;
+}
+
 export interface SettleInput {
   projectId: string;
   needId: string;
@@ -70,6 +99,9 @@ export interface SettleInput {
   totalAmount: bigint;
   /** 中标报价（分） */
   quote: bigint;
+  /** 外部退款回执：pledgeId → 托管方流水号（事务外已调用 PaymentGateway） */
+  refunds?: RefundReceipt[];
+  provider: string;
   actorId?: string;
 }
 
@@ -77,13 +109,14 @@ export interface SettleInput {
  * 最终结算（F17）：
  * 1. 托管总额中超出报价的部分，按承诺金额比例退回支持者；
  * 2. 全部承诺置为已放款；
- * 3. 项目完成、需求进入已完成。
+ * 3. 项目完成、需求进入已完成（走状态机唯一入口）。
  */
 export async function settleProjectInTx(
   tx: Prisma.TransactionClient,
   input: SettleInput,
 ): Promise<{ refunded: bigint }> {
   const leftover = input.totalAmount > input.quote ? input.totalAmount - input.quote : 0n;
+  const receiptByPledge = new Map((input.refunds ?? []).map((r) => [r.pledgeId, r.ref]));
   let refunded = 0n;
 
   const pledges = await tx.pledge.findMany({
@@ -122,7 +155,8 @@ export async function settleProjectInTx(
             type: "REFUND",
             amount: share,
             status: "SUCCESS",
-            gateway: "mock",
+            gateway: input.provider,
+            gatewayRef: receiptByPledge.get(pledge.id) ?? null,
             payload: { projectId: input.projectId, pledgeId: pledge.id, kind: "SETTLE_LEFTOVER" },
           },
         });
@@ -149,20 +183,22 @@ export async function settleProjectInTx(
     data: { status: "COMPLETED" },
   });
 
-  await tx.need.update({
-    where: { id: input.needId },
-    data: { status: NeedStatus.COMPLETED },
+  const moved = await transitionNeedInTx(tx, {
+    needId: input.needId,
+    from: NeedStatus.ACCEPTING,
+    to: NeedStatus.COMPLETED,
+    reason: "全部里程碑验收通过，项目完成",
+    actorId: input.actorId ?? null,
   });
-
-  await tx.needStatusLog.create({
-    data: {
-      needId: input.needId,
-      fromStatus: NeedStatus.ACCEPTING,
-      toStatus: NeedStatus.COMPLETED,
-      reason: "全部里程碑验收通过，项目完成",
-      actorId: input.actorId ?? null,
-    },
-  });
+  if (!moved) {
+    const current = await tx.need.findUnique({
+      where: { id: input.needId },
+      select: { status: true },
+    });
+    if (current?.status !== NeedStatus.COMPLETED) {
+      throw new Error("需求状态不是验收中，无法结算");
+    }
+  }
 
   return { refunded };
 }

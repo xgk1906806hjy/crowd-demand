@@ -1,13 +1,19 @@
 import {
   MilestoneStatus,
   NeedStatus,
+  PledgeStatus,
   UserRole,
   type Prisma,
 } from "@prisma/client";
 import { prisma } from "@/infrastructure/prisma/client";
 import { writeAudit } from "@/domain/shared/audit";
 import { ok, err, DomainError, type Result } from "@/domain/shared/result";
-import { releaseMilestoneInTx, settleProjectInTx } from "@/domain/payout/service";
+import { releaseMilestoneInTx, settleProjectInTx, type RefundReceipt } from "@/domain/payout/service";
+import { transitionNeedInTx } from "@/domain/need/transition";
+import {
+  createPaymentGateway,
+  type PaymentGateway,
+} from "@/infrastructure/payment/gateway";
 
 export const MILESTONE_LIMITS = {
   countMin: 1,
@@ -60,7 +66,10 @@ function len(s: string): number {
 }
 
 export class MilestoneService {
-  constructor(private readonly db: typeof prisma = prisma) {}
+  constructor(
+    private readonly db: typeof prisma = prisma,
+    private readonly gateway: PaymentGateway = createPaymentGateway(),
+  ) {}
 
   /** 拆分里程碑（F14）：中标开发者在开工前定义节点与放款比例。 */
   async plan(
@@ -235,21 +244,13 @@ export class MilestoneService {
         data: { status: "ACCEPTING" },
       });
 
-      const moved = await tx.need.updateMany({
-        where: { id: milestone.project.needId, status: NeedStatus.IN_PROGRESS },
-        data: { status: NeedStatus.ACCEPTING },
+      await transitionNeedInTx(tx, {
+        needId: milestone.project.needId,
+        from: NeedStatus.IN_PROGRESS,
+        to: NeedStatus.ACCEPTING,
+        reason: "开发者提交里程碑交付物，进入验收",
+        actorId,
       });
-      if (moved.count === 1) {
-        await tx.needStatusLog.create({
-          data: {
-            needId: milestone.project.needId,
-            fromStatus: NeedStatus.IN_PROGRESS,
-            toStatus: NeedStatus.ACCEPTING,
-            reason: "开发者提交里程碑交付物，进入验收",
-            actorId,
-          },
-        });
-      }
     });
 
     await writeAudit({
@@ -262,7 +263,12 @@ export class MilestoneService {
     return ok({ status: MilestoneStatus.SUBMITTED });
   }
 
-  /** 验收并放款（F15/F16）：发起者确认 → 托管放款 → 若全部完成则结算（F17）。 */
+  /**
+   * 验收并放款（F15/F16）：发起者确认 → 托管放款 → 若全部完成则结算（F17）。
+   *
+   * 顺序：事务内认领节点 → 事务外调用 PaymentGateway（按 reference 幂等）→ 事务内记账。
+   * 外部通道失败会把认领回滚，节点保持可再次验收；同一 reference 重复调用不会二次划账。
+   */
   async accept(
     actorId: string,
     milestoneId: string,
@@ -271,6 +277,7 @@ export class MilestoneService {
       where: { id: milestoneId },
       select: {
         id: true,
+        seq: true,
         status: true,
         releaseAmount: true,
         projectId: true,
@@ -280,6 +287,7 @@ export class MilestoneService {
             needId: true,
             totalAmount: true,
             proposal: { select: { quote: true, builderId: true } },
+            milestones: { select: { id: true, seq: true, status: true } },
           },
         },
       },
@@ -303,38 +311,123 @@ export class MilestoneService {
       return err("该节点尚未提交交付物，无法验收", DomainError.INVALID_STATE);
     }
 
-    const result = await this.db.$transaction(async (tx) => {
-      await tx.milestone.update({
-        where: { id: milestoneId },
-        data: { status: MilestoneStatus.ACCEPTED, acceptedAt: new Date() },
-      });
+    // 顺序约束：前置节点未放款不得跳过验收
+    const blocking = milestone.project.milestones.filter(
+      (m) => m.seq < milestone.seq && m.status !== MilestoneStatus.RELEASED,
+    );
+    if (blocking.length > 0) {
+      return err("请先完成前置里程碑的验收与放款", DomainError.INVALID_STATE);
+    }
 
-      const payoutId = await releaseMilestoneInTx(tx, {
-        projectId: milestone.projectId,
-        milestoneId,
-        needId: milestone.project.needId,
-        payeeId: milestone.project.proposal.builderId,
-        amount: milestone.releaseAmount,
-      });
-
-      const remaining = await tx.milestone.count({
-        where: { projectId: milestone.projectId, status: { not: MilestoneStatus.RELEASED } },
-      });
-
-      let refunded = 0n;
-      if (remaining === 0) {
-        const settled = await settleProjectInTx(tx, {
-          projectId: milestone.projectId,
-          needId: milestone.project.needId,
-          totalAmount: milestone.project.totalAmount,
-          quote: milestone.project.proposal.quote,
-          actorId,
-        });
-        refunded = settled.refunded;
-      }
-
-      return { payoutId, refunded, completed: remaining === 0 };
+    // 原子认领：并发验收同一节点时只有一方能拿到
+    const claimed = await this.db.milestone.updateMany({
+      where: { id: milestoneId, status: MilestoneStatus.SUBMITTED },
+      data: { status: MilestoneStatus.ACCEPTED, acceptedAt: new Date() },
     });
+    if (claimed.count !== 1) {
+      return err("该节点已被处理，请刷新后查看", DomainError.CONFLICT);
+    }
+
+    const remaining = milestone.project.milestones.filter(
+      (m) => m.id !== milestoneId && m.status !== MilestoneStatus.RELEASED,
+    ).length;
+    const isFinal = remaining === 0;
+
+    let gatewayRef: string | null = null;
+    const refunds: RefundReceipt[] = [];
+
+    try {
+      gatewayRef = (
+        await this.gateway.release({
+          amount: milestone.releaseAmount,
+          reference: `payout:${milestoneId}`,
+        })
+      ).ref;
+
+      if (isFinal) {
+        const quote = milestone.project.proposal.quote;
+        const leftover =
+          milestone.project.totalAmount > quote ? milestone.project.totalAmount - quote : 0n;
+        if (leftover > 0n) {
+          const pledges = await this.db.pledge.findMany({
+            where: {
+              needId: milestone.project.needId,
+              status: { in: [PledgeStatus.FROZEN, PledgeStatus.LOCKED] },
+            },
+            select: { id: true, amount: true },
+          });
+          const totalPledged = pledges.reduce((sum, p) => sum + p.amount, 0n);
+          let allocated = 0n;
+          for (let i = 0; i < pledges.length; i += 1) {
+            const pledge = pledges[i];
+            if (!pledge) continue;
+            const isLast = i === pledges.length - 1;
+            const share = isLast ? leftover - allocated : (leftover * pledge.amount) / totalPledged;
+            if (share <= 0n) continue;
+            const receipt = await this.gateway.refund({
+              amount: share,
+              reference: `settle:${pledge.id}`,
+            });
+            refunds.push({ pledgeId: pledge.id, ref: receipt.ref });
+            allocated += share;
+          }
+        }
+      }
+    } catch {
+      // 外部通道调用失败：回滚认领，节点保持待验收，便于原样重试
+      await this.db.milestone.updateMany({
+        where: { id: milestoneId, status: MilestoneStatus.ACCEPTED },
+        data: { status: MilestoneStatus.SUBMITTED, acceptedAt: null },
+      });
+      await writeAudit({
+        action: "PAYOUT",
+        actorId,
+        target: `milestone:${milestoneId}`,
+        detail: { event: "PAYOUT_GATEWAY_FAILED" },
+      });
+      return err("资金通道调用失败，请稍后重试", DomainError.SERVICE_UNAVAILABLE);
+    }
+
+    let result: { payoutId: string; refunded: bigint; completed: boolean };
+    try {
+      result = await this.db.$transaction(async (tx) => {
+        const payoutId = await releaseMilestoneInTx(tx, {
+          projectId: milestone.projectId,
+          milestoneId,
+          needId: milestone.project.needId,
+          payeeId: milestone.project.proposal.builderId,
+          amount: milestone.releaseAmount,
+          gatewayRef,
+          provider: this.gateway.provider,
+        });
+
+        const left = await tx.milestone.count({
+          where: { projectId: milestone.projectId, status: { not: MilestoneStatus.RELEASED } },
+        });
+
+        let refunded = 0n;
+        if (left === 0) {
+          const settled = await settleProjectInTx(tx, {
+            projectId: milestone.projectId,
+            needId: milestone.project.needId,
+            totalAmount: milestone.project.totalAmount,
+            quote: milestone.project.proposal.quote,
+            refunds,
+            provider: this.gateway.provider,
+            actorId,
+          });
+          refunded = settled.refunded;
+        }
+
+        return { payoutId, refunded, completed: left === 0 };
+      });
+    } catch {
+      await this.db.milestone.updateMany({
+        where: { id: milestoneId, status: MilestoneStatus.ACCEPTED },
+        data: { status: MilestoneStatus.SUBMITTED, acceptedAt: null },
+      });
+      return err("放款记账失败，请稍后重试", DomainError.SERVICE_UNAVAILABLE);
+    }
 
     await writeAudit({
       action: "PAYOUT",
@@ -402,8 +495,23 @@ export class MilestoneService {
 
   /** 需求详情页的项目面板数据。 */
   async getByNeed(needId: string, viewerId?: string | null): Promise<Result<ProjectView | null>> {
+    return this.loadView({ needId }, viewerId);
+  }
+
+  /** 按项目 ID 读取（接口层 /api/projects/[id]/milestones）。 */
+  async getByProject(
+    projectId: string,
+    viewerId?: string | null,
+  ): Promise<Result<ProjectView | null>> {
+    return this.loadView({ id: projectId }, viewerId);
+  }
+
+  private async loadView(
+    where: { needId: string } | { id: string },
+    viewerId?: string | null,
+  ): Promise<Result<ProjectView | null>> {
     const project = await this.db.project.findUnique({
-      where: { needId },
+      where,
       select: {
         id: true,
         status: true,

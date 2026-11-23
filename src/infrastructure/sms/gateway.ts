@@ -2,6 +2,7 @@
  * 短信适配器接口 —— 业务代码只依赖此接口，不直接调用具体 SDK。
  * 技术规则见 AGENTS.md 第 2 节第 4 条。
  */
+import { assertMockAdapterAllowed } from "@/lib/env";
 export interface SmsGateway {
   sendCode(params: { phone: string; code: string; purpose: string }): Promise<void>;
 }
@@ -9,10 +10,8 @@ export interface SmsGateway {
 /** 开发环境/MVP 用：不真实发送，把验证码打印到日志，便于本地联调。 */
 export class MockSmsGateway implements SmsGateway {
   async sendCode({ phone, code, purpose }: { phone: string; code: string; purpose: string }) {
-    // 仅在非生产环境输出；生产环境禁止 mock
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("合规红线：生产环境禁止使用 mock 短信适配器");
-    }
+    // 生产环境默认禁止；仅 APP_ENV=demo 的内部演示实例放行（并打印告警）
+    assertMockAdapterAllowed("短信");
     console.info(`[MockSMS] to=${phone} purpose=${purpose} code=${code}`);
   }
 }

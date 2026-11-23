@@ -10,6 +10,7 @@ import { env } from "@/lib/env";
 import { writeAudit } from "@/domain/shared/audit";
 import { ok, err, DomainError, type Result } from "@/domain/shared/result";
 import { NEED_STATUS_LABEL, isPledgeable } from "@/domain/need/state-machine";
+import { transitionNeedInTx } from "@/domain/need/transition";
 import { computeProgress } from "@/domain/need/query";
 import { ESCROW_ACCOUNT, backerAccount, postTransfer } from "@/domain/ledger/service";
 import {
@@ -176,23 +177,16 @@ export class PledgeService {
       let funded = updated.targetAmount > 0n && updated.pledgedAmount >= updated.targetAmount;
 
       if (funded && updated.status === NeedStatus.PLEDGING) {
-        const moved = await tx.need.updateMany({
-          where: { id: needId, status: NeedStatus.PLEDGING },
-          data: { status: NeedStatus.BIDDING },
+        const moved = await transitionNeedInTx(tx, {
+          needId,
+          from: NeedStatus.PLEDGING,
+          to: NeedStatus.BIDDING,
+          reason: "承诺金额达标，资金锁定并进入竞标",
         });
-        if (moved.count === 1) {
+        if (moved) {
           await tx.pledge.updateMany({
             where: { needId, status: PledgeStatus.FROZEN },
             data: { status: PledgeStatus.LOCKED },
-          });
-          await tx.needStatusLog.create({
-            data: {
-              needId,
-              fromStatus: NeedStatus.PLEDGING,
-              toStatus: NeedStatus.BIDDING,
-              reason: "承诺金额达标，资金锁定并进入竞标",
-              actorId: null,
-            },
           });
           status = NeedStatus.BIDDING;
         } else {

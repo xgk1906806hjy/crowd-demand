@@ -4,6 +4,7 @@ import {
   ESCROW_ACCOUNT,
   backerAccount,
   balanceOf,
+  builderAccount,
   postTransfer,
 } from "@/domain/ledger/service";
 import { makeFinanceDb } from "../helpers/finance-db";
@@ -127,5 +128,44 @@ describe("复式账本（F10）", () => {
       idempotencyKey: "same-key",
     });
     expect(ledger.map((e) => e.idempotencyKey).sort()).toEqual(["same-key:in", "same-key:out"]);
+  });
+
+  it("托管账户余额不足时拒绝划出（防超额放款）", async () => {
+    const { db } = makeFinanceDb();
+
+    await expect(
+      postTransfer(db as never, {
+        from: ESCROW_ACCOUNT,
+        to: builderAccount("b1"),
+        amount: 100n,
+        bizType: "RELEASE",
+        bizId: "m1",
+        idempotencyKey: "payout:m1",
+      }),
+    ).rejects.toThrow("托管账户余额不足");
+  });
+
+  it("托管余额刚好等于放款额时允许划出，余额归零", async () => {
+    const { db } = makeFinanceDb();
+
+    await postTransfer(db as never, {
+      from: backerAccount("u1"),
+      to: ESCROW_ACCOUNT,
+      amount: 5_000n,
+      bizType: "PLEDGE",
+      bizId: "p1",
+      idempotencyKey: "pledge:p1",
+    });
+    await postTransfer(db as never, {
+      from: ESCROW_ACCOUNT,
+      to: builderAccount("b1"),
+      amount: 5_000n,
+      bizType: "RELEASE",
+      bizId: "m1",
+      idempotencyKey: "payout:m1",
+    });
+
+    expect(await balanceOf(db as never, ESCROW_ACCOUNT)).toBe(0n);
+    expect(await balanceOf(db as never, builderAccount("b1"))).toBe(5_000n);
   });
 });

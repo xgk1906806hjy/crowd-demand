@@ -3,6 +3,7 @@ import { prisma } from "@/infrastructure/prisma/client";
 import { writeAudit } from "@/domain/shared/audit";
 import { ok, err, DomainError, type Result } from "@/domain/shared/result";
 import { isVotable, NEED_STATUS_LABEL } from "@/domain/need/state-machine";
+import { transitionNeedInTx } from "@/domain/need/transition";
 
 export interface VoteResultView {
   voted: boolean;
@@ -71,22 +72,15 @@ export class VoteService {
       let thresholdReached = updated.voteCount >= updated.voteThreshold;
 
       if (thresholdReached && updated.status === NeedStatus.COLLECTING) {
-        // 条件更新，避免并发重复流转
-        const moved = await tx.need.updateMany({
-          where: { id: needId, status: NeedStatus.COLLECTING },
-          data: { status: NeedStatus.PLEDGING },
+        // 条件更新 + 状态机校验，避免并发重复流转
+        const moved = await transitionNeedInTx(tx, {
+          needId,
+          from: NeedStatus.COLLECTING,
+          to: NeedStatus.PLEDGING,
+          reason: `票数达标（${updated.voteCount}/${updated.voteThreshold}），进入承诺期`,
         });
-        if (moved.count === 1) {
+        if (moved) {
           status = NeedStatus.PLEDGING;
-          await tx.needStatusLog.create({
-            data: {
-              needId,
-              fromStatus: NeedStatus.COLLECTING,
-              toStatus: NeedStatus.PLEDGING,
-              reason: `票数达标（${updated.voteCount}/${updated.voteThreshold}），进入承诺期`,
-              actorId: null,
-            },
-          });
         }
         thresholdReached = status === NeedStatus.PLEDGING;
       }

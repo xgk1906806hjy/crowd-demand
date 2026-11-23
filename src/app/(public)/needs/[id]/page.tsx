@@ -21,6 +21,7 @@ import { ReportButton } from "@/components/need/report-button";
 import { centsToYuan } from "@/lib/money";
 import { displayMoney, displayDate, displayDateTime, daysLeft } from "@/lib/display";
 import { NEED_STATUS_LABEL, isVotable } from "@/domain/need/state-machine";
+import { isImagePath } from "@/lib/uploads";
 
 export const dynamic = "force-dynamic";
 
@@ -307,13 +308,25 @@ export default async function NeedDetailPage({ params }: { params: Promise<{ id:
         {need.attachments.length > 0 && (
           <section className="mt-6">
             <h2 className="text-sm font-semibold text-slate-700">附件</h2>
-            <ul className="mt-2 space-y-1 text-sm text-slate-600">
+            <div className="mt-2 grid gap-3 sm:grid-cols-3">
               {need.attachments.map((a) => (
-                <li key={a} className="font-mono text-xs">
-                  {a}
-                </li>
+                <div key={a} className="overflow-hidden rounded-xl border border-slate-200">
+                  {isImagePath(a) ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={a} alt="需求附件" className="h-32 w-full object-cover" />
+                  ) : (
+                    <a
+                      href={a}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex h-32 items-center justify-center px-2 text-xs text-slate-600 hover:underline"
+                    >
+                      查看附件（PDF）
+                    </a>
+                  )}
+                </div>
               ))}
-            </ul>
+            </div>
           </section>
         )}
       </div>

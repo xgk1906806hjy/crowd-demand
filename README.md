@@ -101,7 +101,7 @@ npm install
 cp .env.example .env
 # 编辑 .env，至少确认 DATABASE_URL 与 AUTH_SECRET
 
-# 3. 启动依赖服务（PostgreSQL / Redis / MinIO）
+# 3. 启动依赖服务（PostgreSQL / Redis）
 docker compose up -d
 
 # 4. 初始化数据库
@@ -138,7 +138,7 @@ crowd-demand/
 │   │   ├── (public)/            # 公开页：需求广场、详情、登录
 │   │   ├── (console)/           # 登录后：控制台、需求管理、实名、承诺、提案
 │   │   ├── admin/               # 运营后台
-│   │   └── api/                 # 26 个 Route Handler
+│   │   └── api/                 # 29 个 Route Handler
 │   ├── domain/                  # 领域层（业务规则的唯一来源）
 │   │   ├── auth/ kyc/ role/ reputation/
 │   │   ├── need/ vote/ pledge/ proposal/
@@ -178,15 +178,28 @@ crowd-demand/
 
 ```bash
 npm run typecheck   # 类型检查
-npm test            # 单元测试（117 个用例）
+npm test            # 单元测试（129 个用例）
 npm run build       # 生产构建
 ```
 
-测试策略：领域服务通过依赖注入接收 `db` 与适配器，测试用内存 mock 实现，覆盖状态机流转、投票幂等、账本借贷平衡、承诺额度、里程碑比例等业务规则，不需要启动数据库。
+测试策略：领域服务通过依赖注入接收 `db` 与适配器，测试用内存 mock 实现，覆盖状态机流转、投票幂等、账本借贷平衡、承诺额度、里程碑比例、合规闸门等业务规则，不需要启动数据库。
+
+> 注意：mock 单测覆盖不到原生 SQL 的真实行为。涉及 `$queryRaw` 的路径（如账本串行锁）必须再跑一次真实实例的端到端冒烟，见下文。
 
 ## 部署
 
-生产部署见 **[docs/部署流程.md](docs/部署流程.md)**，包含 Docker 单机部署、手动部署、数据库迁移、备份与常见故障处理。
+生产部署见 **[docs/部署流程.md](docs/部署流程.md)**，包含 Docker 单机部署、手动部署、数据库结构初始化、备份与常见故障处理。
+
+当前演示实例：**http://192.168.100.91:8000**（内网，`APP_ENV=demo`，支付/短信/实名均为 Mock，仅用于功能验收，不接待真实资金）。
+
+部署后务必执行端到端冒烟（真实 HTTP，覆盖注册→实名→发需求→投票→承诺→竞标→提案→选标→交付→验收）：
+
+```bash
+./deploy/smoke.sh                              # 默认 http://127.0.0.1:8000
+./deploy/smoke.sh http://192.168.100.91:8000
+```
+
+预期输出 `[smoke] 全部通过：35 项检查`。
 
 ## 合规声明
 
@@ -200,9 +213,13 @@ npm run build       # 生产构建
 ## 当前状态
 
 - P0 的 20 个功能已完整实现并通过类型检查、单元测试与生产构建。
-- 支付、短信、实名三个外部能力仍为 Mock 适配器。
-- 多支持者联合验收、定时任务（BullMQ 自动结算）、Playwright E2E 尚未实现。
-- 生产部署前需执行 `prisma migrate deploy` 建立真实表结构。
+- 资金链路已补三处护栏：账本事务级串行锁 + 托管余额不可透支、流拍/竞标终止必退款、放款与结算退款统一走 `PaymentGateway` 并留痕 `PaymentOrder`。
+- 到期结算已自动化：内部 `POST /api/internal/cron`（校验 `x-cron-secret`）+ 生产 compose 的 cron 容器每 5 分钟触发，运营接口保留为兜底。
+- 附件可上传（`/api/uploads` → `/api/files/[name]`，≤5MB，png/jpeg/webp/pdf），MVP 落本地 `UPLOAD_DIR`。
+- 支付、短信、实名三个外部能力仍为 Mock 适配器。合规校验统一收敛到 `assertMockAdapterAllowed()`：`NODE_ENV=production` 下默认抛错拦截，只有显式声明 `APP_ENV=demo` 的内部演示实例才放行，并在日志持续告警。
+- 已在虚拟机 `192.168.100.91:8000` 完成 Docker 部署，端到端冒烟 35 项全通过；账本借贷两端各 445,000 分、差额 0，托管余额与已承诺/已放款完全对账。
+- 部署时数据库结构由 `prisma/init.sql` 幂等应用（standalone 镜像不含 Prisma CLI），改动 schema 后需重新生成该文件。
+- 已知限制：结算的外部退款与事务之间存在极窄并发窗口（单一发起者验收下不可达）；多支持者联合验收、Playwright E2E 尚未实现；P1 的七项（需求模板、反刷票增强、承诺退出、作品集、交付物托管、评价与退款率、数据看板）待开发。
 
 ## 开发规范
 

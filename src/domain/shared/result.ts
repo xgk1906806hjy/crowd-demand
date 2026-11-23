@@ -22,6 +22,7 @@ export const DomainError = {
   RATE_LIMITED: "RATE_LIMITED",
   UNAUTHORIZED: "UNAUTHORIZED",
   INVALID_STATE: "INVALID_STATE",
+  SERVICE_UNAVAILABLE: "SERVICE_UNAVAILABLE",
 } as const;
 
 export type DomainErrorCode = (typeof DomainError)[keyof typeof DomainError];

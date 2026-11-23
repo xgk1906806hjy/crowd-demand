@@ -15,6 +15,10 @@ RUN npm ci --no-audit --no-fund
 # ---------- 构建 ----------
 FROM base AS builder
 WORKDIR /app
+# 构建期占位值：Next 在 Collecting page data 阶段会执行 env 校验，
+# 缺少必填项会直接构建失败。这里只用于通过校验，运行时会由 compose 注入真实值。
+ENV DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build?schema=public"
+ENV AUTH_SECRET="build-time-placeholder-secret-not-used-at-runtime"
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # 构建期需要生成 Prisma Client；若网络受限可加 PRISMA_ENGINES_MIRROR
@@ -32,13 +36,15 @@ RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs -m nextjs
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
-# Prisma schema 与引擎：运行时需要执行 migrate / 连接数据库
+# Prisma 引擎与 schema：运行时仅需 @prisma/client 连库，
+# 建表由部署脚本用 prisma/init.sql 完成，故不复制 Prisma CLI（其依赖树在 standalone 中不完整）
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/prisma ./node_modules/prisma
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
 COPY --chown=nextjs:nodejs deploy/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
+# 附件存储目录：先建好并授权，命名卷首次挂载会继承该属主
+RUN mkdir -p /app/storage/uploads && chown -R nextjs:nodejs /app/storage
 
 USER nextjs
 EXPOSE 3000

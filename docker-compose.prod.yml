@@ -22,6 +22,7 @@ services:
       - internal
 
   app:
+    image: crowd-demand-app:local
     build:
       context: .
       dockerfile: Dockerfile
@@ -33,12 +34,18 @@ services:
       REDIS_URL: redis://redis:6379
       AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET is required}
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost}
+      # production（默认，最严格）| demo（仅内部演示，允许 Mock 支付，禁止真实资金）
+      APP_ENV: ${APP_ENV:-production}
       SMS_ADAPTER: ${SMS_ADAPTER:-mock}
       KYC_ADAPTER: ${KYC_ADAPTER:-mock}
       PAYMENT_ADAPTER: ${PAYMENT_ADAPTER:-mock}
       EMAIL_ADAPTER: ${EMAIL_ADAPTER:-mock}
       MAX_PLEDGE_AMOUNT_CENTS: ${MAX_PLEDGE_AMOUNT_CENTS:-5000000}
       MAX_USER_PLEDGE_CENTS: ${MAX_USER_PLEDGE_CENTS:-20000000}
+      CRON_SECRET: ${CRON_SECRET:?CRON_SECRET is required}
+      UPLOAD_DIR: /app/storage/uploads
+    volumes:
+      - uploads:/app/storage/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,6 +76,26 @@ services:
     networks:
       - internal
 
+  # 到期结算定时任务：每 5 分钟调用一次内部 cron 接口（F11）
+  cron:
+    image: crowd-demand-app:local
+    container_name: crowd-demand-cron
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        while true; do
+          sleep ${CRON_INTERVAL_SECONDS:-300};
+          node -e "fetch(process.env.APP_INTERNAL_URL + '/api/internal/cron', { method: 'POST', headers: { 'x-cron-secret': process.env.CRON_SECRET } }).then(r => console.log(new Date().toISOString(), 'cron status', r.status)).catch(e => console.error('cron failed', e.message))";
+        done
+    environment:
+      CRON_SECRET: ${CRON_SECRET:?CRON_SECRET is required}
+      APP_INTERNAL_URL: http://app:3000
+    depends_on:
+      - app
+    networks:
+      - internal
+
   nginx:
     image: nginx:alpine
     container_name: crowd-demand-nginx
@@ -85,6 +112,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  uploads:
 
 networks:
   internal:

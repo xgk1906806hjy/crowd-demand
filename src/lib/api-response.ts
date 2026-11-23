@@ -10,6 +10,7 @@ const statusByCode: Record<string, number> = {
   [DomainError.RATE_LIMITED]: 429,
   [DomainError.UNAUTHORIZED]: 401,
   [DomainError.INVALID_STATE]: 409,
+  [DomainError.SERVICE_UNAVAILABLE]: 503,
 };
 
 /** 将领域层 Result 映射为 HTTP 响应。bigint 会被序列化为字符串。 */

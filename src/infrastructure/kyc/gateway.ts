@@ -2,6 +2,8 @@
  * 实名核验适配器接口 —— 业务代码只依赖此接口。
  * 生产接入持牌/权威核验服务；MVP 用 Mock。
  */
+import { assertMockAdapterAllowed } from "@/lib/env";
+
 export interface KycVerifyParams {
   realName: string;
   idNumber: string;
@@ -20,9 +22,8 @@ export interface KycGateway {
 /** 开发/测试用：姓名含「拒绝」则模拟核验失败，便于覆盖失败分支。 */
 export class MockKycGateway implements KycGateway {
   async verify({ realName }: KycVerifyParams): Promise<KycVerifyResult> {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("合规红线：生产环境禁止使用 mock 实名适配器");
-    }
+    // 生产环境默认禁止；仅 APP_ENV=demo 的内部演示实例放行（并打印告警）
+    assertMockAdapterAllowed("实名");
     if (realName.includes("拒绝")) {
       return { passed: false, reason: "身份信息与权威库不匹配（模拟）" };
     }

@@ -82,6 +82,8 @@ export function makeFinanceDb() {
   };
 
   const db = {
+    // 账本串行锁（pg_advisory_xact_lock）在内存库里是空操作
+    $queryRaw: async () => [{ lock: null }],
     user: {
       findUnique: async ({ where }: { where: { id?: string } }) =>
         where.id ? (users.get(where.id) ?? null) : null,
@@ -354,6 +356,22 @@ export function makeFinanceDb() {
         if (!m) throw new Error("milestone not found");
         applyData(m, data);
         return m;
+      },
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      }) => {
+        let count = 0;
+        for (const m of milestones) {
+          if (where.id && m.id !== where.id) continue;
+          if (typeof where.status === "string" && m.status !== where.status) continue;
+          applyData(m, data);
+          count += 1;
+        }
+        return { count };
       },
       count: async ({ where }: { where: { projectId: string; status?: { not?: string } } }) =>
         milestones.filter(

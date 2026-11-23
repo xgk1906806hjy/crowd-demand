@@ -19,9 +19,36 @@ export default function NewNeedPage() {
   });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [attachments, setAttachments] = useState<{ url: string; name: string }[]>([]);
+  const [uploading, setUploading] = useState(false);
 
   function update(key: keyof typeof form, value: string) {
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function uploadFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    setMessage("");
+    try {
+      for (const file of Array.from(files)) {
+        if (attachments.length >= 9) {
+          setMessage("附件最多 9 个");
+          break;
+        }
+        const body = new FormData();
+        body.append("file", file);
+        const res = await fetch("/api/uploads", { method: "POST", body });
+        const data = await res.json();
+        if (!res.ok) {
+          setMessage(data.error ?? "附件上传失败");
+          break;
+        }
+        setAttachments((prev) => [...prev, { url: data.data.url as string, name: data.data.name as string }]);
+      }
+    } finally {
+      setUploading(false);
+    }
   }
 
   async function submit(e: React.FormEvent) {
@@ -46,6 +73,7 @@ export default function NewNeedPage() {
           targetAmountYuan: form.targetAmountYuan,
           voteThreshold: form.voteThreshold,
           deadline: form.deadline ? new Date(form.deadline).toISOString() : null,
+          attachments: attachments.map((a) => a.url),
           publish: true,
         }),
       });
@@ -168,6 +196,43 @@ export default function NewNeedPage() {
               className={field}
             />
           </div>
+        </div>
+
+        <div>
+          <label htmlFor="attachments" className="text-sm font-medium text-slate-700">
+            附件（可选）
+          </label>
+          <input
+            id="attachments"
+            type="file"
+            multiple
+            accept="image/png,image/jpeg,image/webp,application/pdf"
+            disabled={uploading}
+            onChange={(e) => void uploadFiles(e.target.files)}
+            className="mt-1 block w-full text-sm text-slate-600 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-900 file:px-3 file:py-2 file:text-sm file:text-white hover:file:bg-slate-700 disabled:opacity-50"
+          />
+          <p className="mt-1 text-xs text-slate-400">
+            最多 9 个，单个不超过 5MB，支持 PNG / JPEG / WebP / PDF
+            {uploading && "（上传中…）"}
+          </p>
+          {attachments.length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs text-slate-600">
+              {attachments.map((a) => (
+                <li key={a.url} className="flex items-center justify-between gap-2">
+                  <a href={a.url} target="_blank" rel="noreferrer" className="truncate hover:underline">
+                    {a.name}
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => setAttachments((prev) => prev.filter((x) => x.url !== a.url))}
+                    className="text-rose-600 hover:underline"
+                  >
+                    移除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         <p className="rounded-lg bg-slate-50 p-3 text-xs leading-5 text-slate-500">

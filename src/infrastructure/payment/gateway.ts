@@ -1,4 +1,4 @@
-import { env } from "@/lib/env";
+import { assertProductionPaymentSafe, env } from "@/lib/env";
 
 /**
  * 支付/托管适配器 —— 领域层只依赖本接口，不感知具体持牌机构。
@@ -35,12 +35,11 @@ export class MockPaymentGateway implements PaymentGateway {
   }
 }
 
-/** 按环境变量选择适配器。生产环境禁止 Mock（合规红线）。 */
+/** 按环境变量选择适配器。生产环境禁止 Mock（合规红线，规则见 assertProductionPaymentSafe）。 */
 export function createPaymentGateway(): PaymentGateway {
   if (env.PAYMENT_ADAPTER === "mock") {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("合规红线：生产环境禁止使用 Mock 支付适配器，请接入持牌机构");
-    }
+    // 双重保险：即便启动钩子未执行（如自定义入口），真正动钱前也会再拦一次
+    assertProductionPaymentSafe();
     return new MockPaymentGateway();
   }
   // licensed 适配器在接入持牌机构后实现（F10 后续）
