@@ -131,14 +131,14 @@ npm run dev
 crowd-demand/
 ├── AGENTS.md                    # 开发规则（AI/人协作必读）
 ├── prisma/
-│   ├── schema.prisma            # 数据模型（18 张表）
+│   ├── schema.prisma            # 数据模型（16 张表）
 │   └── seed.ts                  # 演示数据
 ├── src/
 │   ├── app/
 │   │   ├── (public)/            # 公开页：需求广场、详情、登录
 │   │   ├── (console)/           # 登录后：控制台、需求管理、实名、承诺、提案
 │   │   ├── admin/               # 运营后台
-│   │   └── api/                 # 25 个 Route Handler
+│   │   └── api/                 # 26 个 Route Handler
 │   ├── domain/                  # 领域层（业务规则的唯一来源）
 │   │   ├── auth/ kyc/ role/ reputation/
 │   │   ├── need/ vote/ pledge/ proposal/
@@ -159,7 +159,7 @@ crowd-demand/
 
 ## 数据模型概览
 
-18 张核心表，围绕四条链路组织：
+16 张核心表，围绕四条链路组织：
 
 - **身份**：`User` `KycRecord` `VerificationCode`
 - **需求**：`Need` `NeedStatusLog` `Vote`
