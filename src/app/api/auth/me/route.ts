@@ -8,8 +8,20 @@ export async function GET() {
   if (!session) return toResponse(err("未登录", DomainError.UNAUTHORIZED));
   const user = await prisma.user.findUnique({
     where: { id: session.userId },
-    select: { id: true, phone: true, nickname: true, roles: true, kycStatus: true, reputationScore: true },
+    select: {
+      id: true,
+      phone: true,
+      email: true,
+      username: true,
+      nickname: true,
+      roles: true,
+      kycStatus: true,
+      reputationScore: true,
+      passwordHash: true,
+    },
   });
   if (!user) return toResponse(err("用户不存在", DomainError.NOT_FOUND));
-  return toResponse(ok(user));
+  // 绝不返回密码哈希，只暴露"是否已设置"
+  const { passwordHash, ...safe } = user;
+  return toResponse(ok({ ...safe, hasPassword: passwordHash !== null }));
 }

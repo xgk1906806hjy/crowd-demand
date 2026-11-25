@@ -59,7 +59,7 @@ export interface TransferInput {
   from: AccountRef;
   to: AccountRef;
   amount: bigint;
-  bizType: "PLEDGE" | "RELEASE" | "REFUND";
+  bizType: "PLEDGE" | "RELEASE" | "REFUND" | "BOUNTY";
   bizId: string;
   /** 业务幂等键；账本内部会派生 `:out` / `:in` 两个唯一键。 */
   idempotencyKey: string;

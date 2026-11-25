@@ -9,15 +9,9 @@ export async function SiteHeader() {
     <header className="border-b border-slate-200 bg-white">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
         <Link href="/" className="text-base font-bold tracking-tight">
-          聚需 <span className="text-xs font-normal text-slate-400">crowd-demand</span>
+          需求社 <span className="text-xs font-normal text-slate-400">crowd-demand</span>
         </Link>
         <nav className="flex items-center gap-5 text-sm text-slate-600">
-          <Link href="/needs" className="hover:text-slate-900">
-            需求广场
-          </Link>
-          <Link href="/needs?sort=pledge" className="hover:text-slate-900">
-            承诺榜
-          </Link>
           {session ? (
             <>
               <Link

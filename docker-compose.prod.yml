@@ -36,13 +36,60 @@ services:
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost}
       # production（默认，最严格）| demo（仅内部演示，允许 Mock 支付，禁止真实资金）
       APP_ENV: ${APP_ENV:-production}
+      # 会话 Cookie Secure 策略：auto=按 X-Forwarded-Proto 自动（https 才加 Secure）
+      # 明文 HTTP 演示站必须保持 auto 或 false，否则浏览器丢弃 Cookie 导致登录不上
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-auto}
       SMS_ADAPTER: ${SMS_ADAPTER:-mock}
       KYC_ADAPTER: ${KYC_ADAPTER:-mock}
       PAYMENT_ADAPTER: ${PAYMENT_ADAPTER:-mock}
       EMAIL_ADAPTER: ${EMAIL_ADAPTER:-mock}
+      # 真实邮件（EMAIL_ADAPTER=smtp 时必填）
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      # 阿里云短信（SMS_ADAPTER=aliyun 时必填）
+      ALIYUN_SMS_ACCESS_KEY_ID: ${ALIYUN_SMS_ACCESS_KEY_ID:-}
+      ALIYUN_SMS_ACCESS_KEY_SECRET: ${ALIYUN_SMS_ACCESS_KEY_SECRET:-}
+      ALIYUN_SMS_SIGN_NAME: ${ALIYUN_SMS_SIGN_NAME:-}
+      ALIYUN_SMS_TEMPLATE_CODE: ${ALIYUN_SMS_TEMPLATE_CODE:-}
+      ALIYUN_SMS_TEMPLATE_PARAM: ${ALIYUN_SMS_TEMPLATE_PARAM:-code}
+      # 腾讯云短信（SMS_ADAPTER=tencent 时必填）
+      TENCENT_SMS_SECRET_ID: ${TENCENT_SMS_SECRET_ID:-}
+      TENCENT_SMS_SECRET_KEY: ${TENCENT_SMS_SECRET_KEY:-}
+      TENCENT_SMS_SDK_APP_ID: ${TENCENT_SMS_SDK_APP_ID:-}
+      TENCENT_SMS_SIGN_NAME: ${TENCENT_SMS_SIGN_NAME:-}
+      TENCENT_SMS_TEMPLATE_ID: ${TENCENT_SMS_TEMPLATE_ID:-}
+      TENCENT_SMS_REGION: ${TENCENT_SMS_REGION:-ap-guangzhou}
       MAX_PLEDGE_AMOUNT_CENTS: ${MAX_PLEDGE_AMOUNT_CENTS:-5000000}
       MAX_USER_PLEDGE_CENTS: ${MAX_USER_PLEDGE_CENTS:-20000000}
       CRON_SECRET: ${CRON_SECRET:?CRON_SECRET is required}
+      # F29 需求采集：来源（csdn/weixin/juejin/douyin/kuaishou/websearch/hn/v2ex/reddit，逗号分隔）、
+      # 采集间隔（分钟，v0.8 默认 10）、小时聚合间隔（分钟，默认 60）、单来源超时（毫秒）
+      CLUE_SOURCES: ${CLUE_SOURCES:-csdn,weixin,juejin,douyin,kuaishou,hn}
+      CLUE_INGEST_INTERVAL_MIN: ${CLUE_INGEST_INTERVAL_MIN:-10}
+      CLUE_ANALYZE_INTERVAL_MIN: ${CLUE_ANALYZE_INTERVAL_MIN:-60}
+      CLUE_ANALYZE_MAX_ITEMS: ${CLUE_ANALYZE_MAX_ITEMS:-200}
+      CLUE_QUERIES_PER_ROUND: ${CLUE_QUERIES_PER_ROUND:-4}
+      CLUE_FETCH_TIMEOUT_MS: ${CLUE_FETCH_TIMEOUT_MS:-15000}
+      # 轮次是否直接入库（v0.8 默认 false：改由小时聚合统一入库）
+      CLUE_ROUND_INGEST: ${CLUE_ROUND_INGEST:-false}
+      # 可选：联网搜索 API（配置后启用 websearch 来源）
+      CLUE_SEARCH_API_URL: ${CLUE_SEARCH_API_URL:-}
+      CLUE_SEARCH_API_KEY: ${CLUE_SEARCH_API_KEY:-}
+      # 可选：OpenAI 兼容大模型整合（三项齐备才启用，留空则走规则聚合）
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      # 接口协议：chat（默认 /chat/completions）| responses（/responses）
+      LLM_WIRE_API: ${LLM_WIRE_API:-chat}
+      # 可选：备用模型，主模型调用失败时自动回退（同样三项齐备才启用）
+      LLM_FALLBACK_BASE_URL: ${LLM_FALLBACK_BASE_URL:-}
+      LLM_FALLBACK_API_KEY: ${LLM_FALLBACK_API_KEY:-}
+      LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-}
+      LLM_FALLBACK_WIRE_API: ${LLM_FALLBACK_WIRE_API:-chat}
       UPLOAD_DIR: /app/storage/uploads
     volumes:
       - uploads:/app/storage/uploads
@@ -91,6 +138,9 @@ services:
     environment:
       CRON_SECRET: ${CRON_SECRET:?CRON_SECRET is required}
       APP_INTERNAL_URL: http://app:3000
+    # cron 容器复用 app 镜像但没有应用进程，禁用镜像内置的 :3000 健康检查，避免误报 unhealthy
+    healthcheck:
+      disable: true
     depends_on:
       - app
     networks:

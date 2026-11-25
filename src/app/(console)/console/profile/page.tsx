@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { RolePanel } from "@/components/console/role-panel";
 
 type Reputation = {
   score: number;
@@ -11,18 +12,9 @@ type Reputation = {
   refundRate: number;
 };
 
-const ROLE_TEXT: Record<string, string> = {
-  REQUESTER: "需求发起者",
-  BACKER: "支持者",
-  BUILDER: "开发者",
-  OPERATOR: "运营方",
-};
-
 export default function ProfilePage() {
   const [roles, setRoles] = useState<string[]>([]);
   const [reputation, setReputation] = useState<Reputation | null>(null);
-  const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     const [meRes, repRes] = await Promise.all([
@@ -43,65 +35,12 @@ export default function ProfilePage() {
     void load();
   }, [load]);
 
-  async function apply(role: string) {
-    setMessage("");
-    setBusy(true);
-    try {
-      const res = await fetch("/api/roles/apply", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setMessage(data.error ?? "申请失败");
-      } else {
-        setRoles(data.data.roles as string[]);
-        setMessage("申请成功");
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <main className="mx-auto max-w-md px-6 py-12">
       <Link href="/console" className="text-sm text-slate-500 hover:underline">
         ← 返回控制台
       </Link>
       <h1 className="mt-4 text-2xl font-bold">角色与信誉</h1>
-
-      <section className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
-        <h2 className="text-sm font-medium text-slate-500">我的角色</h2>
-        <div className="mt-2 flex flex-wrap gap-2">
-          {roles.map((r) => (
-            <span key={r} className="rounded-full bg-slate-100 px-3 py-1 text-sm">
-              {ROLE_TEXT[r] ?? r}
-            </span>
-          ))}
-        </div>
-        <div className="mt-4 flex gap-2">
-          {!roles.includes("REQUESTER") && (
-            <button
-              onClick={() => apply("REQUESTER")}
-              disabled={busy}
-              className="rounded-lg border border-slate-900 px-3 py-1.5 text-sm disabled:opacity-50"
-            >
-              申请成为需求发起者
-            </button>
-          )}
-          {!roles.includes("BUILDER") && (
-            <button
-              onClick={() => apply("BUILDER")}
-              disabled={busy}
-              className="rounded-lg bg-slate-900 px-3 py-1.5 text-sm text-white disabled:opacity-50"
-            >
-              申请成为开发者（需实名）
-            </button>
-          )}
-        </div>
-        {message && <p className="mt-3 text-sm text-amber-600">{message}</p>}
-      </section>
 
       <section className="mt-4 rounded-xl border border-slate-200 bg-white p-5">
         <h2 className="text-sm font-medium text-slate-500">信誉分</h2>
@@ -113,7 +52,9 @@ export default function ProfilePage() {
             </div>
             <div className="flex justify-between">
               <span className="text-slate-500">履约项目</span>
-              <span>{reputation.completedProjects} / {reputation.totalProjects}</span>
+              <span>
+                {reputation.completedProjects} / {reputation.totalProjects}
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-slate-500">退款率</span>
@@ -127,6 +68,10 @@ export default function ProfilePage() {
           <p className="mt-2 text-sm text-slate-400">加载中…</p>
         )}
       </section>
+
+      <div className="mt-4">
+        <RolePanel initialRoles={roles} />
+      </div>
     </main>
   );
 }

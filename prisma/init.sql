@@ -1,4 +1,3 @@
-BEGIN;
 -- CreateSchema
 CREATE SCHEMA IF NOT EXISTS "public";
 
@@ -10,6 +9,9 @@ CREATE TYPE "KycStatus" AS ENUM ('NONE', 'PENDING', 'VERIFIED', 'REJECTED');
 
 -- CreateEnum
 CREATE TYPE "NeedStatus" AS ENUM ('DRAFT', 'COLLECTING', 'PLEDGING', 'BIDDING', 'IN_PROGRESS', 'ACCEPTING', 'COMPLETED', 'FAILED', 'REFUNDED');
+
+-- CreateEnum
+CREATE TYPE "NeedMode" AS ENUM ('CROWDFUND', 'BOUNTY', 'OPEN');
 
 -- CreateEnum
 CREATE TYPE "PledgeStatus" AS ENUM ('FROZEN', 'LOCKED', 'RELEASED', 'REFUNDED');
@@ -34,12 +36,16 @@ CREATE TABLE "User" (
     "id" TEXT NOT NULL,
     "phone" TEXT,
     "email" TEXT,
+    "username" TEXT,
     "nickname" TEXT,
     "avatarUrl" TEXT,
     "roles" "UserRole"[] DEFAULT ARRAY['BACKER']::"UserRole"[],
     "kycStatus" "KycStatus" NOT NULL DEFAULT 'NONE',
     "kycIdNumberHash" TEXT,
     "reputationScore" INTEGER NOT NULL DEFAULT 0,
+    "passwordHash" TEXT,
+    "passwordFailedAttempts" INTEGER NOT NULL DEFAULT 0,
+    "passwordLockedUntil" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -85,6 +91,9 @@ CREATE TABLE "Need" (
     "expectedForm" TEXT,
     "attachments" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "status" "NeedStatus" NOT NULL DEFAULT 'DRAFT',
+    "mode" "NeedMode" NOT NULL DEFAULT 'CROWDFUND',
+    "bountyAmount" BIGINT NOT NULL DEFAULT 0,
+    "bountyDeadline" TIMESTAMP(3),
     "voteThreshold" INTEGER NOT NULL DEFAULT 100,
     "voteCount" INTEGER NOT NULL DEFAULT 0,
     "targetAmount" BIGINT NOT NULL DEFAULT 0,
@@ -95,6 +104,21 @@ CREATE TABLE "Need" (
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "Need_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "BountyEscrow" (
+    "id" TEXT NOT NULL,
+    "needId" TEXT NOT NULL,
+    "amount" BIGINT NOT NULL,
+    "refundedAmount" BIGINT NOT NULL DEFAULT 0,
+    "paymentRef" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'HELD',
+    "idempotencyKey" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "BountyEscrow_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -281,6 +305,9 @@ CREATE UNIQUE INDEX "User_phone_key" ON "User"("phone");
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "User_username_key" ON "User"("username");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "User_kycIdNumberHash_key" ON "User"("kycIdNumberHash");
 
 -- CreateIndex
@@ -288,6 +315,9 @@ CREATE INDEX "User_phone_idx" ON "User"("phone");
 
 -- CreateIndex
 CREATE INDEX "User_email_idx" ON "User"("email");
+
+-- CreateIndex
+CREATE INDEX "User_username_idx" ON "User"("username");
 
 -- CreateIndex
 CREATE INDEX "KycRecord_userId_idx" ON "KycRecord"("userId");
@@ -305,7 +335,19 @@ CREATE INDEX "Need_status_voteCount_idx" ON "Need"("status", "voteCount");
 CREATE INDEX "Need_status_pledgedAmount_idx" ON "Need"("status", "pledgedAmount");
 
 -- CreateIndex
+CREATE INDEX "Need_mode_status_idx" ON "Need"("mode", "status");
+
+-- CreateIndex
 CREATE INDEX "Need_requesterId_idx" ON "Need"("requesterId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "BountyEscrow_needId_key" ON "BountyEscrow"("needId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "BountyEscrow_idempotencyKey_key" ON "BountyEscrow"("idempotencyKey");
+
+-- CreateIndex
+CREATE INDEX "BountyEscrow_status_idx" ON "BountyEscrow"("status");
 
 -- CreateIndex
 CREATE INDEX "NeedStatusLog_needId_createdAt_idx" ON "NeedStatusLog"("needId", "createdAt");
@@ -380,6 +422,9 @@ ALTER TABLE "KycRecord" ADD CONSTRAINT "KycRecord_userId_fkey" FOREIGN KEY ("use
 ALTER TABLE "Need" ADD CONSTRAINT "Need_requesterId_fkey" FOREIGN KEY ("requesterId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "BountyEscrow" ADD CONSTRAINT "BountyEscrow_needId_fkey" FOREIGN KEY ("needId") REFERENCES "Need"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "NeedStatusLog" ADD CONSTRAINT "NeedStatusLog_needId_fkey" FOREIGN KEY ("needId") REFERENCES "Need"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -425,4 +470,59 @@ ALTER TABLE "Payout" ADD CONSTRAINT "Payout_projectId_fkey" FOREIGN KEY ("projec
 ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_actorId_fkey" FOREIGN KEY ("actorId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 
-COMMIT;
+-- ============================================================
+-- F29 平台需求采集（2026-11-24 追加，与 patches/2026-11-24-f29-clues.sql 一致）
+-- ============================================================
+-- F29 平台需求采集：线索聚合相关表（幂等，可重复执行）
+-- 用法：docker exec -i crowd-demand-db psql -U crowd -d crowd_demand < prisma/patches/2026-11-24-f29-clues.sql
+
+DO $$ BEGIN
+  CREATE TYPE "ClueStatus" AS ENUM ('COLLECTED', 'FEATURED', 'DISCARDED');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS "DemandSource" (
+  "key"       TEXT PRIMARY KEY,
+  "name"      TEXT NOT NULL,
+  "enabled"   BOOLEAN NOT NULL DEFAULT TRUE,
+  "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS "DemandClue" (
+  "id"             TEXT PRIMARY KEY,
+  "title"          TEXT NOT NULL,
+  "summary"        TEXT NOT NULL,
+  "keywords"       TEXT[] NOT NULL DEFAULT '{}',
+  "status"         "ClueStatus" NOT NULL DEFAULT 'COLLECTED',
+  "mentionCount"   INTEGER NOT NULL DEFAULT 0,
+  "mentionerCount" INTEGER NOT NULL DEFAULT 0,
+  "firstSeenAt"    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "lastSeenAt"     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "reviewedBy"     TEXT,
+  "reviewedAt"     TIMESTAMPTZ,
+  "createdAt"      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  "updatedAt"      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS "DemandClue_status_mentionerCount_idx" ON "DemandClue" ("status", "mentionerCount");
+CREATE INDEX IF NOT EXISTS "DemandClue_status_mentionCount_idx" ON "DemandClue" ("status", "mentionCount");
+
+CREATE TABLE IF NOT EXISTS "ClueMention" (
+  "id"          TEXT PRIMARY KEY,
+  "clueId"      TEXT NOT NULL REFERENCES "DemandClue"("id"),
+  "sourceKey"   TEXT NOT NULL,
+  "externalId"  TEXT NOT NULL,
+  "authorKey"   TEXT NOT NULL,
+  "url"         TEXT NOT NULL,
+  "excerpt"     TEXT NOT NULL,
+  "mentionedAt" TIMESTAMPTZ NOT NULL,
+  "createdAt"   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "ClueMention_sourceKey_externalId_key" ON "ClueMention" ("sourceKey", "externalId");
+CREATE INDEX IF NOT EXISTS "ClueMention_clueId_idx" ON "ClueMention" ("clueId");
+
+CREATE TABLE IF NOT EXISTS "CronState" (
+  "key"       TEXT PRIMARY KEY,
+  "lastRunAt" TIMESTAMPTZ NOT NULL
+);
+

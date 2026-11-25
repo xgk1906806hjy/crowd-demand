@@ -13,10 +13,14 @@ export type MemUser = {
 export type MemNeed = {
   id: string;
   status: string;
+  mode?: string;
+  bountyAmount?: bigint;
+  bountyDeadline?: Date | null;
   deadline: Date | null;
   targetAmount: bigint;
   pledgedAmount: bigint;
   requesterId?: string;
+  publishedAt?: Date | null;
 };
 export type MemPledge = {
   id: string;
@@ -63,9 +67,11 @@ export function makeFinanceDb() {
   const orders: Array<Record<string, unknown>> = [];
   const logs: Array<Record<string, unknown>> = [];
   const proposals: Array<Record<string, unknown>> = [];
+  const proposalVotes: Array<Record<string, unknown>> = [];
   const projects: Array<Record<string, unknown>> = [];
   const milestones: Array<Record<string, unknown>> = [];
   const payouts: Array<Record<string, unknown>> = [];
+  const escrows: Array<Record<string, unknown>> = [];
   let seq = 0;
   const nextId = (prefix: string) => `${prefix}${++seq}`;
 
@@ -89,9 +95,32 @@ export function makeFinanceDb() {
         where.id ? (users.get(where.id) ?? null) : null,
     },
     need: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        const n = {
+          id: nextId("n"),
+          status: "DRAFT",
+          mode: "CROWDFUND",
+          bountyAmount: 0n,
+          bountyDeadline: null,
+          targetAmount: 0n,
+          pledgedAmount: 0n,
+          deadline: null,
+          createdAt: new Date(),
+          ...data,
+        } as unknown as MemNeed;
+        needs.set(n.id, n);
+        return { ...n };
+      },
       findUnique: async ({ where }: { where: { id: string } }) => {
         const n = needs.get(where.id);
-        return n ? { ...n } : null;
+        return n
+          ? ({
+              ...n,
+              // 对齐数据库默认值：历史数据没有 mode 字段，一律视为众筹
+              mode: n.mode ?? "CROWDFUND",
+              bountyAmount: n.bountyAmount ?? 0n,
+            } as MemNeed)
+          : null;
       },
       findMany: async ({ where }: { where: Record<string, unknown> } = { where: {} }) => {
         return [...needs.values()].filter((n) => {
@@ -247,6 +276,7 @@ export function makeFinanceDb() {
               nickname: null,
               reputationScore: 0,
             },
+            votes: proposalVotes.filter((v) => v.proposalId === p.id),
           })),
       create: async ({ data }: { data: Record<string, unknown> }) => {
         const p = { id: nextId("pr"), createdAt: new Date(), ...data };
@@ -277,7 +307,100 @@ export function makeFinanceDb() {
         return { count };
       },
     },
+    proposalVote: {
+      findMany: async ({ where }: { where: Record<string, unknown> }) => {
+        const ids = (where.proposalId as { in?: string[] } | undefined)?.in;
+        return proposalVotes.filter((v) => {
+          if (typeof where.userId === "string" && v.userId !== where.userId) return false;
+          if (typeof where.proposalId === "string" && v.proposalId !== where.proposalId) {
+            return false;
+          }
+          if (ids && !ids.includes(v.proposalId as string)) return false;
+          return true;
+        });
+      },
+      findFirst: async ({ where }: { where: Record<string, unknown> }) => {
+        const ids = (where.proposalId as { in?: string[] } | undefined)?.in;
+        return (
+          proposalVotes.find((v) => {
+            if (typeof where.userId === "string" && v.userId !== where.userId) return false;
+            if (ids && !ids.includes(v.proposalId as string)) return false;
+            return true;
+          }) ?? null
+        );
+      },
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        const dup = proposalVotes.find(
+          (v) => v.proposalId === data.proposalId && v.userId === data.userId,
+        );
+        if (dup) throw new Error("Unique constraint failed on (proposalId, userId)");
+        const v = { id: nextId("pv"), createdAt: new Date(), ...data };
+        proposalVotes.push(v);
+        return v;
+      },
+      deleteMany: async ({ where }: { where: { id?: { in?: string[] } } }) => {
+        const ids = where.id?.in ?? [];
+        let count = 0;
+        for (let i = proposalVotes.length - 1; i >= 0; i -= 1) {
+          const v = proposalVotes[i];
+          if (v && ids.includes(v.id as string)) {
+            proposalVotes.splice(i, 1);
+            count += 1;
+          }
+        }
+        return { count };
+      },
+    },
+    bountyEscrow: {
+      findUnique: async ({
+        where,
+      }: {
+        where: { needId?: string; idempotencyKey?: string; id?: string };
+      }) =>
+        escrows.find((e) =>
+          where.needId
+            ? e.needId === where.needId
+            : where.idempotencyKey
+              ? e.idempotencyKey === where.idempotencyKey
+              : e.id === where.id,
+        ) ?? null,
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        if (escrows.some((e) => e.idempotencyKey === data.idempotencyKey)) {
+          throw new Error("Unique constraint failed on the fields: (`idempotencyKey`)");
+        }
+        const e = {
+          id: nextId("be"),
+          refundedAmount: 0n,
+          status: "HELD",
+          createdAt: new Date(),
+          ...data,
+        } as Record<string, unknown>;
+        escrows.push(e);
+        return e;
+      },
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { needId?: string; id?: string };
+        data: Record<string, unknown>;
+      }) => {
+        const e = escrows.find((x) =>
+          where.needId ? x.needId === where.needId : x.id === where.id,
+        );
+        if (!e) throw new Error("bounty escrow not found");
+        applyData(e as Record<string, unknown>, data);
+        return e;
+      },
+    },
     project: {
+      findMany: async ({ where }: { where: Record<string, unknown> } = { where: {} }) =>
+        projects.filter((x) => {
+          if (where.needId && x.needId !== where.needId) return false;
+          return true;
+        }),
+      findFirst: async ({ where }: { where: { needId?: string } }) =>
+        projects.find((x) => (where.needId ? x.needId === where.needId : true)) ?? null,
       findUnique: async ({ where }: { where: { id?: string; needId?: string } }) => {
         const p = projects.find((x) =>
           where.id ? x.id === where.id : x.needId === where.needId,
@@ -402,8 +525,10 @@ export function makeFinanceDb() {
     orders,
     logs,
     proposals,
+    proposalVotes,
     projects,
     milestones,
     payouts,
+    escrows,
   };
 }

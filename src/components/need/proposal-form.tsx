@@ -5,10 +5,11 @@ import { useRouter } from "next/navigation";
 
 interface Props {
   needId: string;
-  maxQuoteYuan: string;
+  /** 可报价上限（元）；null 表示无偿需求，不涉及金额 */
+  maxQuoteYuan: string | null;
 }
 
-/** 开发者提交提案（F12）。 */
+/** 开发者提交方案（F12）。 */
 export function ProposalForm({ needId, maxQuoteYuan }: Props) {
   const router = useRouter();
   const [form, setForm] = useState({
@@ -36,7 +37,7 @@ export function ProposalForm({ needId, maxQuoteYuan }: Props) {
         body: JSON.stringify({
           understanding: form.understanding,
           spec: form.spec,
-          quoteYuan: form.quoteYuan,
+          quoteYuan: maxQuoteYuan === null ? "0" : form.quoteYuan,
           durationDays: Number(form.durationDays),
           pastCases: form.pastCases || null,
         }),
@@ -60,7 +61,9 @@ export function ProposalForm({ needId, maxQuoteYuan }: Props) {
     <form onSubmit={submit} className="rounded-xl border border-violet-200 bg-violet-50/40 p-4">
       <div className="text-sm font-semibold text-slate-800">我是开发者，提交方案</div>
       <p className="mt-1 text-xs text-slate-500">
-        同一需求只能提交一份提案；报价不得超过已托管金额 ¥{maxQuoteYuan}。
+        {maxQuoteYuan === null
+          ? "无偿需求不涉及付款，报价固定为 0；需求方选定后由你自愿交付。"
+          : `同一需求只能提交一份提案；报价不得超过托管金额 ¥${maxQuoteYuan}。`}
       </p>
 
       <div className="mt-3 space-y-3">
@@ -91,18 +94,20 @@ export function ProposalForm({ needId, maxQuoteYuan }: Props) {
           />
         </div>
         <div className="grid gap-3 md:grid-cols-2">
-          <div>
-            <label htmlFor="quote" className="text-xs font-medium text-slate-600">
-              报价（元）
-            </label>
-            <input
-              id="quote"
-              value={form.quoteYuan}
-              onChange={(e) => update("quoteYuan", e.target.value)}
-              inputMode="decimal"
-              className={field}
-            />
-          </div>
+          {maxQuoteYuan !== null && (
+            <div>
+              <label htmlFor="quote" className="text-xs font-medium text-slate-600">
+                报价（元）
+              </label>
+              <input
+                id="quote"
+                value={form.quoteYuan}
+                onChange={(e) => update("quoteYuan", e.target.value)}
+                inputMode="decimal"
+                className={field}
+              />
+            </div>
+          )}
           <div>
             <label htmlFor="duration" className="text-xs font-medium text-slate-600">
               工期（天）

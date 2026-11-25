@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   KycStatus,
+  NeedMode,
   NeedStatus,
   PledgeStatus,
   type Prisma,
@@ -83,12 +84,16 @@ export class PledgeService {
       select: {
         id: true,
         status: true,
+        mode: true,
         deadline: true,
         targetAmount: true,
         pledgedAmount: true,
       },
     });
     if (!need) return err("需求不存在", DomainError.NOT_FOUND);
+    if (need.mode !== NeedMode.CROWDFUND) {
+      return err("该需求不是众筹模式，无需付费承诺", DomainError.INVALID_STATE);
+    }
     if (!isPledgeable(need.status)) {
       return err(
         `当前状态为「${NEED_STATUS_LABEL[need.status]}」，仅承诺中可预付订金`,

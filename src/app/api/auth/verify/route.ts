@@ -4,12 +4,17 @@ import { AuthService } from "@/domain/auth/service";
 import { createSmsGateway } from "@/infrastructure/sms/gateway";
 import { err, DomainError } from "@/domain/shared/result";
 import { toResponse } from "@/lib/api-response";
-import { sessionCookie } from "@/lib/session";
+import { sessionCookie, cookieSecureFor } from "@/lib/session";
 
-const bodySchema = z.object({
-  phone: z.string().regex(/^1[3-9]\d{9}$/, "手机号格式不正确"),
-  code: z.string().regex(/^\d{6}$/, "验证码为 6 位数字"),
-});
+const bodySchema = z
+  .object({
+    phone: z.string().optional(),
+    email: z.string().optional(),
+    code: z.string().regex(/^\d{6}$/, "验证码为 6 位数字"),
+  })
+  .refine((v) => Boolean(v.phone?.trim()) !== Boolean(v.email?.trim()), {
+    message: "请提供手机号或邮箱其中之一",
+  });
 
 export async function POST(req: NextRequest) {
   let json: unknown;
@@ -32,7 +37,7 @@ export async function POST(req: NextRequest) {
   response.cookies.set(
     sessionCookie.name,
     result.value.token,
-    sessionCookie.options(process.env.NODE_ENV === "production"),
+    sessionCookie.options(cookieSecureFor(req.headers, req.url)),
   );
   return response;
 }

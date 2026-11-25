@@ -10,6 +10,7 @@ type MemNeed = Record<string, unknown> & { id: string; status: NeedStatus };
 function makeDb() {
   const users = new Map<string, MemUser>();
   const needs = new Map<string, MemNeed>();
+  const escrows = new Map<string, { status: string }>();
   const logs: Array<Record<string, unknown>> = [];
   let nid = 0;
 
@@ -72,13 +73,19 @@ function makeDb() {
         return l;
       },
     },
+    bountyEscrow: {
+      findUnique: async ({ where }: { where: { needId: string } }) => {
+        const e = escrows.get(where.needId);
+        return e ? { needId: where.needId, ...e } : null;
+      },
+    },
     $transaction: async (arg: unknown) =>
       typeof arg === "function"
         ? (arg as (tx: unknown) => Promise<unknown>)(db)
         : Promise.all(arg as Promise<unknown>[]),
   };
 
-  return { db, users, needs, logs };
+  return { db, users, needs, escrows, logs };
 }
 
 const validInput = {
@@ -208,5 +215,46 @@ describe("NeedService 状态流转（F06）", () => {
     expect(last?.fromStatus).toBe(NeedStatus.DRAFT);
     expect(last?.toStatus).toBe(NeedStatus.COLLECTING);
     expect(last?.reason).toBe("发布");
+  });
+});
+
+describe("NeedService 悬赏草稿发布（F28）", () => {
+  let ctx: ReturnType<typeof makeDb>;
+  let service: NeedService;
+  let bountyId: string;
+
+  beforeEach(async () => {
+    ctx = makeDb();
+    service = new NeedService(ctx.db as never);
+    ctx.users.set("u1", { id: "u1", roles: [UserRole.REQUESTER], kycStatus: KycStatus.VERIFIED });
+    const created = await service.create(
+      "u1",
+      { ...validInput, mode: "BOUNTY", bountyAmount: 200_000n },
+      { publish: false },
+    );
+    if (!created.ok) throw new Error("seed failed");
+    bountyId = created.value.id;
+  });
+
+  it("悬赏草稿未托管时不能公开征集", async () => {
+    const res = await service.transition("u1", bountyId, NeedStatus.BIDDING, "发布");
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.code).toBe("INVALID_STATE");
+      expect(res.error).toContain("托管");
+    }
+  });
+
+  it("托管完成后可以公开征集", async () => {
+    ctx.escrows.set(bountyId, { status: "HELD" });
+    const res = await service.transition("u1", bountyId, NeedStatus.BIDDING, "发布");
+    expect(res.ok).toBe(true);
+    expect(ctx.needs.get(bountyId)?.status).toBe(NeedStatus.BIDDING);
+  });
+
+  it("悬赏草稿不能进入众筹承诺期", async () => {
+    ctx.escrows.set(bountyId, { status: "HELD" });
+    const res = await service.transition("u1", bountyId, NeedStatus.COLLECTING, "发布");
+    expect(res.ok).toBe(false);
   });
 });

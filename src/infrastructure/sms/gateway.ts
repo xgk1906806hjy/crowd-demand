@@ -3,6 +3,8 @@
  * 技术规则见 AGENTS.md 第 2 节第 4 条。
  */
 import { assertMockAdapterAllowed } from "@/lib/env";
+import { AliyunSmsGateway } from "@/infrastructure/sms/aliyun";
+import { TencentSmsGateway } from "@/infrastructure/sms/tencent";
 export interface SmsGateway {
   sendCode(params: { phone: string; code: string; purpose: string }): Promise<void>;
 }
@@ -16,12 +18,16 @@ export class MockSmsGateway implements SmsGateway {
   }
 }
 
-/** 工厂：根据环境变量选择实现。生产实现留待接入持牌服务商时补上。 */
+/** 工厂：根据环境变量选择实现。aliyun/tencent 为零 SDK 依赖的签名 HTTP 实现。 */
 export function createSmsGateway(adapter = process.env.SMS_ADAPTER): SmsGateway {
   switch (adapter) {
     case "mock":
     case undefined:
       return new MockSmsGateway();
+    case "aliyun":
+      return new AliyunSmsGateway();
+    case "tencent":
+      return new TencentSmsGateway();
     default:
       throw new Error(`未实现的短信适配器: ${adapter}`);
   }

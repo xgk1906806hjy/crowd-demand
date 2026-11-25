@@ -13,6 +13,8 @@ import { ProposalService } from "@/domain/proposal/service";
 import type { ProposalView } from "@/domain/proposal/service";
 import { ProposalForm } from "@/components/need/proposal-form";
 import { SelectProposalButton } from "@/components/need/select-proposal-button";
+import { ProposalVoteButton } from "@/components/need/proposal-vote-button";
+import { BountyCancelButton } from "@/components/need/bounty-cancel-button";
 import { MilestoneService } from "@/domain/milestone/service";
 import type { ProjectView } from "@/domain/milestone/service";
 import { MilestonePlanForm } from "@/components/need/milestone-plan-form";
@@ -45,6 +47,7 @@ export default async function NeedDetailPage({ params }: { params: Promise<{ id:
   if (!detail || !detail.ok) notFound();
   const need = detail.value;
   const left = daysLeft(need.deadline);
+  const bountyLeft = daysLeft(need.bountyDeadline);
 
   let pledges: PledgeView[] = [];
   try {
@@ -55,9 +58,15 @@ export default async function NeedDetailPage({ params }: { params: Promise<{ id:
   }
 
   let proposals: ProposalView[] = [];
+  let viewerSelection: { proposalId: string | null; weight: string } = {
+    proposalId: null,
+    weight: "0",
+  };
   try {
-    const res = await new ProposalService().listByNeed(id);
+    const svc = new ProposalService();
+    const res = await svc.listByNeed(id);
     if (res.ok) proposals = res.value.items;
+    if (session) viewerSelection = await svc.viewerSelection(session.userId, id);
   } catch {
     proposals = [];
   }
@@ -95,14 +104,35 @@ export default async function NeedDetailPage({ params }: { params: Promise<{ id:
       <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <StatusBadge status={need.status} />
+              <span
+                className={
+                  "rounded-full px-2 py-0.5 text-xs " +
+                  (need.mode === "BOUNTY"
+                    ? "bg-amber-100 text-amber-700"
+                    : need.mode === "OPEN"
+                      ? "bg-emerald-100 text-emerald-700"
+                      : "bg-slate-100 text-slate-600")
+                }
+              >
+                {need.modeLabel}
+              </span>
               <span className="text-xs text-slate-400">发起者 {need.requesterName}</span>
             </div>
             <h1 className="mt-2 text-2xl font-bold leading-8">{need.title}</h1>
             <p className="mt-1 text-xs text-slate-400">
-              发布于 {displayDate(need.publishedAt)} · 截止 {displayDate(need.deadline)}
-              {left !== null && left > 0 ? ` · 剩 ${left} 天` : ""}
+              {need.mode === "CROWDFUND" ? (
+                <>
+                  发布于 {displayDate(need.publishedAt)} · 承诺截止 {displayDate(need.deadline)}
+                  {left !== null && left > 0 ? ` · 剩 ${left} 天` : ""}
+                </>
+              ) : (
+                <>
+                  发布于 {displayDate(need.publishedAt)} · 方案征集截止{" "}
+                  {displayDateTime(need.bountyDeadline)}
+                </>
+              )}
             </p>
             {session && (
               <div className="mt-1">
@@ -112,52 +142,95 @@ export default async function NeedDetailPage({ params }: { params: Promise<{ id:
           </div>
 
           <div className="flex flex-col items-end gap-2">
-            <VoteButton
-              needId={need.id}
-              initialCount={need.voteCount}
-              initialVoted={need.viewer.hasVoted}
-              loggedIn={need.viewer.loggedIn}
-              kycVerified={need.viewer.kycVerified}
-              votable={isVotable(need.status)}
-            />
+            {need.status !== "DRAFT" && (
+              <VoteButton
+                needId={need.id}
+                initialCount={need.voteCount}
+                initialVoted={need.viewer.hasVoted}
+                loggedIn={need.viewer.loggedIn}
+                votable={isVotable(need.status)}
+              />
+            )}
+            {need.viewer.isRequester &&
+              need.mode !== "CROWDFUND" &&
+              need.status === "BIDDING" && (
+                <BountyCancelButton needId={need.id} mode={need.mode} amount={need.bountyAmount} />
+              )}
             {need.viewer.isRequester && (need.status === "DRAFT" || need.status === "COLLECTING") && (
               <NeedActions
                 needId={need.id}
                 status={need.status === "DRAFT" ? "DRAFT" : "COLLECTING"}
+                mode={need.mode}
               />
             )}
           </div>
         </div>
 
-        <div className="mt-6 grid grid-cols-2 gap-4 rounded-xl bg-slate-50 p-4 text-sm md:grid-cols-4">
-          <div>
-            <div className="text-xs text-slate-500">支持票数</div>
-            <div className="mt-1 text-lg font-semibold">
-              {need.voteCount}
-              <span className="ml-1 text-xs font-normal text-slate-400">/ {need.voteThreshold} 票</span>
+        {need.mode === "CROWDFUND" ? (
+          <>
+            <div className="mt-6 grid grid-cols-2 gap-4 rounded-xl bg-slate-50 p-4 text-sm md:grid-cols-4">
+              <div>
+                <div className="text-xs text-slate-500">支持票数</div>
+                <div className="mt-1 text-lg font-semibold">
+                  {need.voteCount}
+                  <span className="ml-1 text-xs font-normal text-slate-400">
+                    / {need.voteThreshold} 票
+                  </span>
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">目标金额</div>
+                <div className="mt-1 text-lg font-semibold">{displayMoney(need.targetAmount)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">已承诺</div>
+                <div className="mt-1 text-lg font-semibold text-emerald-600">
+                  {displayMoney(need.pledgedAmount)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">承诺进度</div>
+                <div className="mt-1 text-lg font-semibold">{need.progress}%</div>
+              </div>
+            </div>
+
+            <div className="mt-3">
+              <Progress value={need.progress} />
+            </div>
+          </>
+        ) : (
+          <div className="mt-6 grid grid-cols-2 gap-4 rounded-xl bg-amber-50/70 p-4 text-sm md:grid-cols-4">
+            <div>
+              <div className="text-xs text-slate-500">
+                {need.mode === "BOUNTY" ? "悬赏金额" : "费用"}
+              </div>
+              <div className="mt-1 text-lg font-semibold">
+                {need.mode === "BOUNTY" ? displayMoney(need.bountyAmount) : "无偿"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">资金状态</div>
+              <div className="mt-1 text-sm font-medium text-slate-700">
+                {need.mode === "BOUNTY" ? "已全额托管" : "不涉及资金"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">已收到方案</div>
+              <div className="mt-1 text-lg font-semibold">{proposals.length}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">征集截止</div>
+              <div className="mt-1 text-sm font-medium text-slate-700">
+                {displayDate(need.bountyDeadline)}
+                {bountyLeft !== null && bountyLeft > 0 ? (
+                  <span className="ml-1 text-xs font-normal text-slate-400">剩 {bountyLeft} 天</span>
+                ) : null}
+              </div>
             </div>
           </div>
-          <div>
-            <div className="text-xs text-slate-500">目标金额</div>
-            <div className="mt-1 text-lg font-semibold">{displayMoney(need.targetAmount)}</div>
-          </div>
-          <div>
-            <div className="text-xs text-slate-500">已承诺</div>
-            <div className="mt-1 text-lg font-semibold text-emerald-600">
-              {displayMoney(need.pledgedAmount)}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs text-slate-500">承诺进度</div>
-            <div className="mt-1 text-lg font-semibold">{need.progress}%</div>
-          </div>
-        </div>
+        )}
 
-        <div className="mt-3">
-          <Progress value={need.progress} />
-        </div>
-
-        {need.status === "PLEDGING" && (
+        {need.status === "PLEDGING" && need.mode === "CROWDFUND" && (
           <section className="mt-6">
             <PledgeForm
               needId={need.id}
@@ -169,7 +242,7 @@ export default async function NeedDetailPage({ params }: { params: Promise<{ id:
           </section>
         )}
 
-        {pledges.length > 0 && (
+        {need.mode === "CROWDFUND" && pledges.length > 0 && (
           <section className="mt-6 rounded-xl border border-slate-200 p-4">
             <div className="text-sm font-semibold text-slate-700">最近支持</div>
             <ul className="mt-2 divide-y divide-slate-100 text-sm">
@@ -190,7 +263,11 @@ export default async function NeedDetailPage({ params }: { params: Promise<{ id:
                 开发方案（{proposals.length}）
               </h2>
               {need.status === "BIDDING" && (
-                <span className="text-xs text-slate-400">发起者选定方案后进入开发</span>
+                <span className="text-xs text-slate-400">
+                  {need.mode === "CROWDFUND"
+                    ? "付过订金的支持者可投票，发起者参考票数后选定方案"
+                    : "发起者对比方案后直接选定一个"}
+                </span>
               )}
             </div>
 
@@ -219,18 +296,38 @@ export default async function NeedDetailPage({ params }: { params: Promise<{ id:
                           </span>
                         </div>
                         <div className="mt-1 text-sm text-slate-700">
-                          报价 {displayMoney(p.quote)} · 工期 {p.durationDays} 天
+                          {need.mode === "OPEN" ? "无偿认领" : `报价 ${displayMoney(p.quote)}`} · 工期{" "}
+                          {p.durationDays} 天
                         </div>
-                      </div>
-                      {need.viewer.isRequester &&
-                        need.status === "BIDDING" &&
-                        p.status === "SUBMITTED" && (
-                          <SelectProposalButton
-                            needId={need.id}
-                            proposalId={p.id}
-                            builderName={p.builderName}
-                          />
+                        {need.mode === "CROWDFUND" && (
+                          <div className="mt-0.5 text-xs text-slate-500">
+                            支持者投票 {p.voteCount} 人 · 票权 {displayMoney(p.voteWeight)}
+                          </div>
                         )}
+                      </div>
+                      <div className="flex flex-col items-end gap-2">
+                        {need.mode === "CROWDFUND" &&
+                          need.viewer.loggedIn &&
+                          need.status === "BIDDING" &&
+                          p.status === "SUBMITTED" &&
+                          !need.viewer.isRequester && (
+                            <ProposalVoteButton
+                              needId={need.id}
+                              proposalId={p.id}
+                              votedProposalId={viewerSelection.proposalId}
+                              canVote={BigInt(viewerSelection.weight) > 0n}
+                            />
+                          )}
+                        {need.viewer.isRequester &&
+                          need.status === "BIDDING" &&
+                          p.status === "SUBMITTED" && (
+                            <SelectProposalButton
+                              needId={need.id}
+                              proposalId={p.id}
+                              builderName={p.builderName}
+                            />
+                          )}
+                      </div>
                     </div>
 
                     <details className="mt-2 text-sm">
@@ -257,26 +354,29 @@ export default async function NeedDetailPage({ params }: { params: Promise<{ id:
               </div>
             )}
 
-            {need.status === "BIDDING" &&
-              need.viewer.isBuilder &&
-              need.viewer.kycVerified &&
-              !hasProposed && (
-                <div className="mt-4">
+            {need.status === "BIDDING" && need.viewer.loggedIn && !hasProposed && (
+              <div className="mt-4">
+                {need.mode !== "OPEN" && !need.viewer.kycVerified ? (
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    这是涉及资金的需求，提交方案（领取）前需先{" "}
+                    <Link href="/console" className="underline">
+                      完成实名认证
+                    </Link>
+                    。
+                  </p>
+                ) : (
                   <ProposalForm
                     needId={need.id}
-                    maxQuoteYuan={centsToYuan(BigInt(need.pledgedAmount))}
+                    maxQuoteYuan={
+                      need.mode === "BOUNTY"
+                        ? centsToYuan(BigInt(need.bountyAmount))
+                        : need.mode === "OPEN"
+                          ? null
+                          : centsToYuan(BigInt(need.pledgedAmount))
+                    }
                   />
-                </div>
-              )}
-
-            {need.status === "BIDDING" && need.viewer.loggedIn && !need.viewer.isBuilder && (
-              <p className="mt-3 text-sm text-slate-500">
-                想接这个需求？
-                <Link href="/console/profile" className="underline">
-                  申请开发者角色
-                </Link>
-                后可提交方案。
-              </p>
+                )}
+              </div>
             )}
           </section>
         )}

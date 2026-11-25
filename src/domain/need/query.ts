@@ -1,5 +1,6 @@
 import {
   KycStatus,
+  NeedMode,
   NeedStatus,
   UserRole,
   type Prisma,
@@ -7,6 +8,7 @@ import {
 import { prisma } from "@/infrastructure/prisma/client";
 import { ok, err, DomainError, type Result } from "@/domain/shared/result";
 import {
+  NEED_MODE_LABEL,
   NEED_STATUS_LABEL,
   isPubliclyVisible,
   isVotable,
@@ -64,6 +66,11 @@ export interface NeedListItemView {
   summary: string;
   status: NeedStatus;
   statusLabel: string;
+  /** 需求模式（F28）：CROWDFUND 众筹 / BOUNTY 悬赏 / OPEN 无偿认领 */
+  mode: NeedMode;
+  modeLabel: string;
+  /** 悬赏金额（分），非悬赏模式为 "0" */
+  bountyAmount: string;
   voteCount: number;
   voteThreshold: number;
   targetAmount: string;
@@ -75,6 +82,8 @@ export interface NeedListItemView {
 }
 
 export interface NeedDetailView extends NeedListItemView {
+  /** 方案征集截止时间（悬赏 / 认领模式） */
+  bountyDeadline: string | null;
   description: string;
   targetAudience: string | null;
   expectedForm: string | null;
@@ -108,6 +117,8 @@ function toListItem(n: {
   title: string;
   description: string;
   status: NeedStatus;
+  mode: NeedMode;
+  bountyAmount: bigint;
   voteCount: number;
   voteThreshold: number;
   targetAmount: bigint;
@@ -122,6 +133,9 @@ function toListItem(n: {
     summary: toSummary(n.description),
     status: n.status,
     statusLabel: NEED_STATUS_LABEL[n.status],
+    mode: n.mode,
+    modeLabel: NEED_MODE_LABEL[n.mode],
+    bountyAmount: n.bountyAmount.toString(),
     voteCount: n.voteCount,
     voteThreshold: n.voteThreshold,
     targetAmount: n.targetAmount.toString(),
@@ -179,6 +193,9 @@ export class NeedQueryService {
           status: true,
           voteCount: true,
           voteThreshold: true,
+          mode: true,
+          bountyAmount: true,
+          bountyDeadline: true,
           targetAmount: true,
           pledgedAmount: true,
           deadline: true,
@@ -212,6 +229,9 @@ export class NeedQueryService {
         status: true,
         voteCount: true,
         voteThreshold: true,
+        mode: true,
+        bountyAmount: true,
+        bountyDeadline: true,
         targetAmount: true,
         pledgedAmount: true,
         deadline: true,
@@ -256,6 +276,7 @@ export class NeedQueryService {
     const base = toListItem(need);
     return ok({
       ...base,
+      bountyDeadline: need.bountyDeadline?.toISOString() ?? null,
       description: need.description,
       targetAudience: need.targetAudience,
       expectedForm: need.expectedForm,

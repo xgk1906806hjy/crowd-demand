@@ -9,17 +9,15 @@ interface Props {
   initialCount: number;
   initialVoted: boolean;
   loggedIn: boolean;
-  kycVerified: boolean;
   votable: boolean;
 }
 
-/** 投票按钮（F07）：未登录引导登录，未实名引导实名，已投可撤回。 */
+/** 投票按钮（F07）：登录即可投（一人一票），已投可撤回。 */
 export function VoteButton({
   needId,
   initialCount,
   initialVoted,
   loggedIn,
-  kycVerified,
   votable,
 }: Props) {
   const router = useRouter();
@@ -57,17 +55,6 @@ export function VoteButton({
         className="inline-flex rounded-lg bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700"
       >
         登录后投票
-      </Link>
-    );
-  }
-
-  if (!kycVerified) {
-    return (
-      <Link
-        href="/console/kyc"
-        className="inline-flex rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-800 hover:bg-amber-100"
-      >
-        实名后可投票（一人一票）
       </Link>
     );
   }

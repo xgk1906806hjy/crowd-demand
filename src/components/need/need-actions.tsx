@@ -6,15 +6,17 @@ import { useRouter } from "next/navigation";
 interface Props {
   needId: string;
   status: "DRAFT" | "COLLECTING";
+  /** 需求模式：非众筹草稿发布后直接进入方案征集，而不是承诺期 */
+  mode?: "CROWDFUND" | "BOUNTY" | "OPEN";
 }
 
-/** 发起者操作（F06）：草稿发布、征集撤销。 */
-export function NeedActions({ needId, status }: Props) {
+/** 发起者操作（F06 / F28）：草稿发布、征集撤销。 */
+export function NeedActions({ needId, status, mode = "CROWDFUND" }: Props) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
-  async function transition(to: "COLLECTING" | "FAILED", reason: string) {
+  async function transition(to: "COLLECTING" | "BIDDING" | "FAILED", reason: string) {
     if (to === "FAILED" && !window.confirm("确认撤销该需求？撤销后不可恢复。")) return;
     setBusy(true);
     setMessage("");
@@ -42,7 +44,12 @@ export function NeedActions({ needId, status }: Props) {
           <button
             type="button"
             disabled={busy}
-            onClick={() => void transition("COLLECTING", "发起者发布草稿")}
+            onClick={() =>
+              void transition(
+                mode === "CROWDFUND" ? "COLLECTING" : "BIDDING",
+                "发起者发布草稿",
+              )
+            }
             className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-50"
           >
             发布需求

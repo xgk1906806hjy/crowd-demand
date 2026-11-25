@@ -1,5 +1,8 @@
-import { NeedStatus, type Prisma } from "@prisma/client";
-import { canTransition, NEED_STATUS_LABEL } from "@/domain/need/state-machine";
+import { NeedMode, NeedStatus, type Prisma } from "@prisma/client";
+import {
+  canTransitionForMode,
+  NEED_STATUS_LABEL,
+} from "@/domain/need/state-machine";
 
 /**
  * 需求状态流转的事务内唯一入口（F06）。
@@ -18,6 +21,8 @@ export interface NeedTransitionInput {
   needId: string;
   from: NeedStatus;
   to: NeedStatus;
+  /** 需求模式，用于判断是否允许跳过投票/承诺期（F28）；缺省按众筹处理。 */
+  mode?: NeedMode;
   reason?: string | null;
   actorId?: string | null;
   /** 与流转同事务更新的附加字段，例如发布时补 publishedAt。 */
@@ -28,7 +33,7 @@ export async function transitionNeedInTx(
   tx: NeedTx,
   input: NeedTransitionInput,
 ): Promise<boolean> {
-  if (!canTransition(input.from, input.to)) {
+  if (!canTransitionForMode(input.from, input.to, input.mode ?? NeedMode.CROWDFUND)) {
     throw new Error(
       `非法流转：${NEED_STATUS_LABEL[input.from]} → ${NEED_STATUS_LABEL[input.to]}`,
     );

@@ -13,6 +13,9 @@ interface MineItem {
   title: string;
   status: NeedStatus;
   statusLabel: string;
+  mode?: "CROWDFUND" | "BOUNTY" | "OPEN";
+  modeLabel?: string;
+  bountyAmount?: string;
   voteCount: number;
   voteThreshold: number;
   targetAmount: string;
@@ -71,12 +74,20 @@ export default async function MyNeedsPage() {
             <div>
               <div className="flex items-center gap-2">
                 <StatusBadge status={item.status} />
+                {item.modeLabel && (
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                    {item.modeLabel}
+                  </span>
+                )}
                 <span className="text-xs text-slate-400">{displayDate(item.publishedAt ?? item.createdAt)}</span>
               </div>
               <div className="mt-1 font-medium">{item.title}</div>
               <div className="mt-1 text-xs text-slate-500">
-                {item.voteCount}/{item.voteThreshold} 票 · 已承诺 {displayMoney(item.pledgedAmount)} /{" "}
-                {displayMoney(item.targetAmount)}
+                {item.mode === "BOUNTY"
+                  ? `悬赏 ${displayMoney(item.bountyAmount ?? "0")} · 已全额托管`
+                  : item.mode === "OPEN"
+                    ? "无偿求助 · 开发者自愿接单"
+                    : `${item.voteCount}/${item.voteThreshold} 票 · 已承诺 ${displayMoney(item.pledgedAmount)} / ${displayMoney(item.targetAmount)}`}
               </div>
             </div>
             <span className="text-sm text-slate-400">→</span>

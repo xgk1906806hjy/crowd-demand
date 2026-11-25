@@ -1,8 +1,12 @@
-import { KycStatus, NeedStatus, UserRole, type Prisma } from "@prisma/client";
+import { KycStatus, NeedMode, NeedStatus, UserRole, type Prisma } from "@prisma/client";
 import { prisma } from "@/infrastructure/prisma/client";
 import { writeAudit } from "@/domain/shared/audit";
 import { ok, err, DomainError, type Result } from "@/domain/shared/result";
-import { canTransition, NEED_STATUS_LABEL } from "@/domain/need/state-machine";
+import {
+  canTransitionForMode,
+  NEED_MODE_LABEL,
+  NEED_STATUS_LABEL,
+} from "@/domain/need/state-machine";
 import { failNeedAndRefund } from "@/domain/pledge/lifecycle";
 import {
   createPaymentGateway,
@@ -33,11 +37,19 @@ export interface CreateNeedInput {
   deadline?: Date | null;
   /** 进入承诺期所需票数，默认 100 */
   voteThreshold?: number;
+  /** 需求模式（PRD v0.2）：众筹 / 悬赏 / 无偿认领，默认众筹。 */
+  mode?: NeedMode;
+  /** 悬赏金额（分），BOUNTY 模式必填。 */
+  bountyAmount?: bigint;
+  /** 方案征集截止时间，BOUNTY / OPEN 使用。 */
+  bountyDeadline?: Date | null;
 }
 
 export interface NeedCreatedView {
   id: string;
   status: NeedStatus;
+  mode: NeedMode;
+  bountyAmount: string;
   publishedAt: Date | null;
 }
 
@@ -78,6 +90,7 @@ export class NeedService {
 
     const title = input.title.trim();
     const description = input.description.trim();
+    const mode = input.mode ?? NeedMode.CROWDFUND;
 
     if (textLength(title) < NEED_LIMITS.titleMin || textLength(title) > NEED_LIMITS.titleMax) {
       return err(
@@ -94,11 +107,25 @@ export class NeedService {
     if (textLength(description) > NEED_LIMITS.descMax) {
       return err(`痛点描述不得超过 ${NEED_LIMITS.descMax} 个字符`, DomainError.VALIDATION);
     }
-    if (input.targetAmount < NEED_LIMITS.amountMin) {
-      return err("承诺目标金额不得低于 100 元", DomainError.VALIDATION);
+    // 众筹才有"承诺目标金额"；悬赏的目标额就是悬赏金，无偿认领没有金额
+    if (mode === NeedMode.CROWDFUND) {
+      if (input.targetAmount < NEED_LIMITS.amountMin) {
+        return err("承诺目标金额不得低于 100 元", DomainError.VALIDATION);
+      }
+      if (input.targetAmount > NEED_LIMITS.amountMax) {
+        return err("承诺目标金额不得超过 1,000,000 元", DomainError.VALIDATION);
+      }
     }
-    if (input.targetAmount > NEED_LIMITS.amountMax) {
-      return err("承诺目标金额不得超过 1,000,000 元", DomainError.VALIDATION);
+    if (mode === NeedMode.BOUNTY) {
+      const bounty = input.bountyAmount ?? 0n;
+      if (bounty < NEED_LIMITS.amountMin) {
+        return err("悬赏金额不得低于 100 元", DomainError.VALIDATION);
+      }
+      if (bounty > NEED_LIMITS.amountMax) {
+        return err("悬赏金额不得超过 1,000,000 元", DomainError.VALIDATION);
+      }
+    } else if (input.bountyAmount && input.bountyAmount !== 0n) {
+      return err("仅悬赏模式可填写悬赏金额", DomainError.VALIDATION);
     }
 
     const attachments = input.attachments ?? [];
@@ -129,7 +156,29 @@ export class NeedService {
     }
 
     const now = new Date();
-    const status = publish ? NeedStatus.COLLECTING : NeedStatus.DRAFT;
+    // 众筹：发布即进征集；悬赏：付费成功后才开放（此处保持草稿）；认领：发布即开放方案征集
+    const status = !publish
+      ? NeedStatus.DRAFT
+      : mode === NeedMode.CROWDFUND
+        ? NeedStatus.COLLECTING
+        : mode === NeedMode.OPEN
+          ? NeedStatus.BIDDING
+          : NeedStatus.DRAFT;
+
+    if (
+      status !== NeedStatus.DRAFT &&
+      !canTransitionForMode(NeedStatus.DRAFT, status, mode)
+    ) {
+      return err("该模式不支持直接发布，请检查模式参数", DomainError.VALIDATION);
+    }
+
+    const bountyAmount = mode === NeedMode.BOUNTY ? (input.bountyAmount ?? 0n) : 0n;
+    const targetAmount =
+      mode === NeedMode.CROWDFUND
+        ? input.targetAmount
+        : mode === NeedMode.BOUNTY
+          ? bountyAmount
+          : 0n;
 
     const need = await this.db.need.create({
       data: {
@@ -140,20 +189,26 @@ export class NeedService {
         expectedForm: input.expectedForm?.trim() || null,
         attachments,
         status,
+        mode,
+        bountyAmount,
+        bountyDeadline: mode === NeedMode.CROWDFUND ? null : (input.bountyDeadline ?? null),
         voteThreshold: threshold,
-        targetAmount: input.targetAmount,
+        targetAmount,
         deadline,
-        publishedAt: publish ? now : null,
+        publishedAt: status === NeedStatus.DRAFT ? null : now,
       },
-      select: { id: true, status: true, publishedAt: true },
+      select: { id: true, status: true, mode: true, bountyAmount: true, publishedAt: true },
     });
 
     await this.db.needStatusLog.create({
       data: {
         needId: need.id,
-        fromStatus: publish ? NeedStatus.DRAFT : null,
+        fromStatus: status === NeedStatus.DRAFT ? null : NeedStatus.DRAFT,
         toStatus: status,
-        reason: publish ? "发布需求" : "创建草稿",
+        reason:
+          status === NeedStatus.DRAFT
+            ? `创建草稿（${NEED_MODE_LABEL[mode]}）`
+            : `${NEED_MODE_LABEL[mode]}模式发布`,
         actorId: userId,
       },
     });
@@ -170,10 +225,21 @@ export class NeedService {
       action: "NEED",
       actorId: userId,
       target: `need:${need.id}`,
-      detail: { event: publish ? "NEED_PUBLISHED" : "NEED_DRAFTED", status },
+      detail: {
+        event: status === NeedStatus.DRAFT ? "NEED_DRAFTED" : "NEED_PUBLISHED",
+        status,
+        mode,
+        bountyAmount: bountyAmount.toString(),
+      },
     });
 
-    return ok({ id: need.id, status: need.status, publishedAt: need.publishedAt });
+    return ok({
+      id: need.id,
+      status: need.status,
+      mode: need.mode,
+      bountyAmount: need.bountyAmount.toString(),
+      publishedAt: need.publishedAt,
+    });
   }
 
   /** 状态流转（F06）：所有状态变更唯一入口，必须写 NeedStatusLog。 */
@@ -185,7 +251,7 @@ export class NeedService {
   ): Promise<Result<{ id: string; status: NeedStatus }>> {
     const need = await this.db.need.findUnique({
       where: { id: needId },
-      select: { id: true, status: true, requesterId: true, publishedAt: true },
+      select: { id: true, status: true, mode: true, requesterId: true, publishedAt: true },
     });
     if (!need) return err("需求不存在", DomainError.NOT_FOUND);
 
@@ -201,7 +267,12 @@ export class NeedService {
         return err("无权操作该需求", DomainError.FORBIDDEN);
       }
       const allowed = REQUESTER_TRANSITIONS[need.status] ?? [];
-      if (!allowed.includes(to)) {
+      // 非众筹草稿发布后直接进入方案征集（BIDDING），不走承诺期
+      const publishToBidding =
+        need.status === NeedStatus.DRAFT &&
+        need.mode !== NeedMode.CROWDFUND &&
+        to === NeedStatus.BIDDING;
+      if (!allowed.includes(to) && !publishToBidding) {
         return err(
           `发起者只能发布需求或撤销征集中的需求（当前：${NEED_STATUS_LABEL[need.status]}）`,
           DomainError.FORBIDDEN,
@@ -209,11 +280,29 @@ export class NeedService {
       }
     }
 
-    if (!canTransition(need.status, to)) {
+    if (!canTransitionForMode(need.status, to, need.mode)) {
       return err(
         `不允许从「${NEED_STATUS_LABEL[need.status]}」流转到「${NEED_STATUS_LABEL[to]}」`,
         DomainError.INVALID_STATE,
       );
+    }
+
+    // 悬赏公开征集前必须已全额托管，否则会出现"未付款却开放方案征集"
+    if (
+      need.mode === NeedMode.BOUNTY &&
+      need.status === NeedStatus.DRAFT &&
+      to === NeedStatus.BIDDING
+    ) {
+      const escrow = await this.db.bountyEscrow.findUnique({
+        where: { needId },
+        select: { status: true },
+      });
+      if (!escrow || escrow.status !== "HELD") {
+        return err(
+          "悬赏需求需先支付悬赏金并完成托管，才能公开征集方案",
+          DomainError.INVALID_STATE,
+        );
+      }
     }
 
     // 流拍必须带走退款：避免「状态置为已流拍、托管资金却留在账上」
@@ -289,6 +378,8 @@ export class NeedService {
           id: true,
           title: true,
           status: true,
+          mode: true,
+          bountyAmount: true,
           voteCount: true,
           voteThreshold: true,
           targetAmount: true,
@@ -306,6 +397,9 @@ export class NeedService {
         title: r.title,
         status: r.status,
         statusLabel: NEED_STATUS_LABEL[r.status],
+        mode: r.mode,
+        modeLabel: NEED_MODE_LABEL[r.mode],
+        bountyAmount: r.bountyAmount.toString(),
         voteCount: r.voteCount,
         voteThreshold: r.voteThreshold,
         targetAmount: r.targetAmount.toString(),

@@ -100,11 +100,20 @@ describe("VoteService 投票（F07）", () => {
     ctx.needs.set("n1", { id: "n1", status: NeedStatus.COLLECTING, voteCount: 0, voteThreshold: 2 });
   });
 
-  it("未实名用户不能投票", async () => {
+  it("未实名用户也能投票（登录即一人一票）", async () => {
     const res = await service.cast("uv", "n1");
-    expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.code).toBe("FORBIDDEN");
-    expect(ctx.needs.get("n1")?.voteCount).toBe(0);
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value.voteCount).toBe(1);
+    expect(ctx.needs.get("n1")?.voteCount).toBe(1);
+  });
+
+  it("竞标期也可投票（仅支持表态，不触发状态流转）", async () => {
+    ctx.needs.set("nb", { id: "nb", status: NeedStatus.BIDDING, voteCount: 0, voteThreshold: 2 });
+    const res = await service.cast("u1", "nb");
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.value.voteCount).toBe(1);
+    expect(ctx.needs.get("nb")?.status).toBe(NeedStatus.BIDDING);
+    expect(ctx.logs).toHaveLength(0);
   });
 
   it("投票后票数 +1", async () => {

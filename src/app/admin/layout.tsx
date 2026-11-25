@@ -26,6 +26,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
           <Link href="/admin/reports" className="hover:text-slate-900">
             举报处理
           </Link>
+          <Link href="/admin/clues" className="hover:text-slate-900">
+            需求线索
+          </Link>
           <Link href="/admin/ledger" className="hover:text-slate-900">
             资金流水
           </Link>

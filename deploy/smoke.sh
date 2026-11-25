@@ -223,6 +223,35 @@ assert_ok "提交提案" "$resp"
 PROPOSAL_ID=$(body_of "$resp" | json_get '.data.id')
 [ -n "$PROPOSAL_ID" ] && ok "提案已提交（$PROPOSAL_ID）" || bad "提案创建失败"
 
+# ---------- 6.1 支持者用承诺选票投票（F13） ----------
+resp=$(api "$JAR_B" POST "/api/needs/$NEED_ID/proposal-vote" "{\"proposalId\":\"$PROPOSAL_ID\"}")
+assert_ok "支持者投票" "$resp"
+VOTE_WEIGHT=$(body_of "$resp" | json_get '.data.weight')
+[ "$VOTE_WEIGHT" = "100000" ] && ok "票权=承诺金额（1000 元 → 100000 分）" || bad "票权异常：$VOTE_WEIGHT"
+
+# 重复投同一提案应幂等，不重复计票
+resp=$(api "$JAR_B" POST "/api/needs/$NEED_ID/proposal-vote" "{\"proposalId\":\"$PROPOSAL_ID\"}")
+REPLAY_CHANGED=$(body_of "$resp" | json_get '.data.changed')
+if [ "$REPLAY_CHANGED" = "False" ] || [ "$REPLAY_CHANGED" = "false" ]; then
+  ok "重复投票幂等（changed=false）"
+else
+  bad "投票幂等异常：changed=$REPLAY_CHANGED"
+fi
+
+# 未付订金者（发起者本人）不得投票
+resp=$(api "$JAR_A" POST "/api/needs/$NEED_ID/proposal-vote" "{\"proposalId\":\"$PROPOSAL_ID\"}")
+VOTE_DENY_CODE=$(code_of "$resp")
+[ "$VOTE_DENY_CODE" = "403" ] && ok "未付订金者投票被拒（403）" || bad "投票权限异常：HTTP $VOTE_DENY_CODE"
+
+# 提案列表应聚合出票数与票权
+resp=$(api "$JAR_A" GET "/api/needs/$NEED_ID/proposals")
+assert_ok "读取提案列表" "$resp"
+VOTE_COUNT=$(body_of "$resp" | json_get '.data.items.0.voteCount')
+VOTE_TOTAL=$(body_of "$resp" | json_get '.data.items.0.voteWeight')
+[ "$VOTE_COUNT" = "1" ] && ok "提案聚合票数=1" || bad "票数聚合异常：$VOTE_COUNT"
+[ "$VOTE_TOTAL" = "100000" ] && ok "提案聚合票权=100000 分" || bad "票权聚合异常：$VOTE_TOTAL"
+
+
 # ---------- 7. 选标 → 建项目与里程碑 ----------
 resp=$(api "$JAR_A" POST "/api/needs/$NEED_ID/select-proposal" "{\"proposalId\":\"$PROPOSAL_ID\"}")
 assert_ok "发起者选标" "$resp"

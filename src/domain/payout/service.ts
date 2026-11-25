@@ -1,4 +1,10 @@
-import { MilestoneStatus, NeedStatus, PledgeStatus, type Prisma } from "@prisma/client";
+import {
+  MilestoneStatus,
+  NeedMode,
+  NeedStatus,
+  PledgeStatus,
+  type Prisma,
+} from "@prisma/client";
 import {
   ESCROW_ACCOUNT,
   backerAccount,
@@ -118,6 +124,81 @@ export async function settleProjectInTx(
   const leftover = input.totalAmount > input.quote ? input.totalAmount - input.quote : 0n;
   const receiptByPledge = new Map((input.refunds ?? []).map((r) => [r.pledgeId, r.ref]));
   let refunded = 0n;
+
+  const needMeta = await tx.need.findUnique({
+    where: { id: input.needId },
+    select: { mode: true, requesterId: true },
+  });
+
+  // 悬赏 / 认领：出资人只有一个（需求方），结余直接退回本人，不按承诺比例分摊
+  if (needMeta?.mode === NeedMode.BOUNTY || needMeta?.mode === NeedMode.OPEN) {
+    if (needMeta.mode === NeedMode.BOUNTY && leftover > 0n) {
+      const escrow = await tx.bountyEscrow.findUnique({ where: { needId: input.needId } });
+      const alreadyRefunded = escrow?.refundedAmount ?? 0n;
+      if (alreadyRefunded < leftover) {
+        const share = leftover - alreadyRefunded;
+        const key = `bountyrefund:${input.needId}`;
+        await postTransfer(tx, {
+          from: ESCROW_ACCOUNT,
+          to: backerAccount(needMeta.requesterId),
+          amount: share,
+          bizType: "REFUND",
+          bizId: key,
+          idempotencyKey: `${key}:settle`,
+          memo: "悬赏结余退回需求方",
+        });
+        await tx.paymentOrder.create({
+          data: {
+            idempotencyKey: `${key}:settle`,
+            type: "REFUND",
+            amount: share,
+            status: "SUCCESS",
+            gateway: input.provider,
+            gatewayRef: null,
+            payload: {
+              projectId: input.projectId,
+              needId: input.needId,
+              kind: "BOUNTY_SETTLE_LEFTOVER",
+            },
+          },
+        });
+        refunded = share;
+        if (escrow) {
+          await tx.bountyEscrow.update({
+            where: { needId: input.needId },
+            data: { refundedAmount: { increment: share }, status: "CLOSED" },
+          });
+        }
+      }
+    } else if (needMeta.mode === NeedMode.OPEN) {
+      // 无偿认领没有资金，直接结项
+      refunded = 0n;
+    }
+
+    await tx.project.update({
+      where: { id: input.projectId },
+      data: { status: "COMPLETED" },
+    });
+
+    const moved = await transitionNeedInTx(tx, {
+      needId: input.needId,
+      from: NeedStatus.ACCEPTING,
+      to: NeedStatus.COMPLETED,
+      mode: needMeta.mode,
+      reason: "全部里程碑验收通过，项目完成",
+      actorId: input.actorId ?? null,
+    });
+    if (!moved) {
+      const current = await tx.need.findUnique({
+        where: { id: input.needId },
+        select: { status: true },
+      });
+      if (current?.status !== NeedStatus.COMPLETED) {
+        throw new Error("需求状态不是验收中，无法结算");
+      }
+    }
+    return { refunded };
+  }
 
   const pledges = await tx.pledge.findMany({
     where: { needId: input.needId, status: { in: [PledgeStatus.FROZEN, PledgeStatus.LOCKED] } },

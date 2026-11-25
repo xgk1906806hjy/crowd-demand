@@ -1,4 +1,4 @@
-import { KycStatus, NeedStatus } from "@prisma/client";
+import { NeedStatus } from "@prisma/client";
 import { prisma } from "@/infrastructure/prisma/client";
 import { writeAudit } from "@/domain/shared/audit";
 import { ok, err, DomainError, type Result } from "@/domain/shared/result";
@@ -14,10 +14,9 @@ export interface VoteResultView {
 }
 
 /**
- * 投票（F07）—— MVP 反刷票三道闸：
- * 1) 登录 + 实名（`kycStatus = VERIFIED`）才能投；
- * 2) 数据库唯一约束 `(needId, userId)` 保证一人一票；
- * 3) 仅征集期可投，票数达标自动进入承诺期（F06 状态机唯一入口）。
+ * 投票（F07）—— 反刷票两道闸（2026-11-24 调整）：
+ * 1) 登录即可投，不再要求实名；一人一票由数据库唯一约束 `(needId, userId)` 保证；
+ * 2) 征集期与竞标期均可投（竞标期仅作支持表态，票数达标只在征集期触发状态流转）。
  */
 export class VoteService {
   constructor(private readonly db: typeof prisma = prisma) {}
@@ -26,12 +25,9 @@ export class VoteService {
   async cast(userId: string, needId: string, ip?: string): Promise<Result<VoteResultView>> {
     const user = await this.db.user.findUnique({
       where: { id: userId },
-      select: { id: true, kycStatus: true },
+      select: { id: true },
     });
     if (!user) return err("用户不存在", DomainError.NOT_FOUND);
-    if (user.kycStatus !== KycStatus.VERIFIED) {
-      return err("投票前需先完成实名认证（一人一票，防止刷票）", DomainError.FORBIDDEN);
-    }
 
     const need = await this.db.need.findUnique({
       where: { id: needId },

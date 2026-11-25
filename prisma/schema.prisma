@@ -37,6 +37,13 @@ enum NeedStatus {
   REFUNDED    // 已退款
 }
 
+/// 需求模式（PRD v0.2）：决定"怎么进入可接单状态"和"钱从哪来"。
+enum NeedMode {
+  CROWDFUND   // 众筹：投票 → 付费承诺达标 → 解锁（多人出资）
+  BOUNTY      // 有偿悬赏：需求方预付全额托管，发布即可收方案（单人出资）
+  OPEN        // 无偿认领：无资金，发布即可收方案
+}
+
 enum PledgeStatus {
   FROZEN      // 已冻结在托管
   LOCKED      // 达标后锁定
@@ -93,12 +100,18 @@ model User {
   id              String    @id @default(cuid())
   phone           String?   @unique
   email           String?   @unique
+  username        String?   @unique       // 用户名密码注册（F32）：小写归一，全局唯一
   nickname        String?
   avatarUrl       String?
   roles           UserRole[] @default([BACKER])
   kycStatus       KycStatus @default(NONE)
   kycIdNumberHash String?   @unique       // 已实名身份证号 HMAC，一人一号（F02）
   reputationScore Int       @default(0)   // 信誉分（F03）
+
+  // 账号密码登录（F31）：scrypt 哈希，禁止明文；失败锁定防爆破
+  passwordHash           String?
+  passwordFailedAttempts Int       @default(0)
+  passwordLockedUntil    DateTime?
 
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
@@ -112,6 +125,7 @@ model User {
 
   @@index([phone])
   @@index([email])
+  @@index([username])
 }
 
 model KycRecord {
@@ -156,6 +170,12 @@ model Need {
   expectedForm  String?
   attachments   String[]   @default([])  // OSS 对象 key
   status        NeedStatus @default(DRAFT)
+  /// 需求模式：众筹 / 悬赏 / 无偿认领（发布后不可更改）
+  mode          NeedMode   @default(CROWDFUND)
+  /// 悬赏金额（分），仅 BOUNTY 模式非 0；发布时需全额预付进托管
+  bountyAmount  BigInt     @default(0)
+  /// 方案征集截止时间，仅 BOUNTY / OPEN 使用
+  bountyDeadline DateTime?
   voteThreshold Int        @default(100) // 进入承诺期的票数门槛
   voteCount     Int        @default(0)   // 冗余票数，榜单排序用（F07/F08）
   targetAmount  BigInt     @default(0)   // 承诺目标金额（分）
@@ -170,11 +190,33 @@ model Need {
   pledges       Pledge[]
   proposals     Proposal[]
   projects      Project[]
+  bountyEscrow  BountyEscrow?
 
   @@index([status, publishedAt])
   @@index([status, voteCount])
   @@index([status, pledgedAmount])
+  @@index([mode, status])
   @@index([requesterId])
+}
+
+/// 悬赏托管（F28）：与 Pledge 分离，避免"一人出资"和"多人承诺"的资金口径混算。
+model BountyEscrow {
+  id             String   @id @default(cuid())
+  needId         String   @unique
+  need           Need     @relation(fields: [needId], references: [id])
+  /// 预付悬赏总额（分）
+  amount         BigInt
+  /// 已退还需求方的金额（分）
+  refundedAmount BigInt   @default(0)
+  /// 支付回执（Mock 为 mock-xxx）
+  paymentRef     String?
+  /// HELD 托管中 / REFUNDED 已全额退回 / CLOSED 已结清
+  status         String   @default("HELD")
+  idempotencyKey String   @unique
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([status])
 }
 
 model NeedStatusLog {
@@ -383,4 +425,98 @@ model Report {
   updatedAt   DateTime @updatedAt
 
   @@index([status, createdAt])
+}
+
+// ============================================================
+// 平台需求采集（F29）：外部公开渠道线索 + 提及聚合
+// ============================================================
+
+enum ClueStatus {
+  COLLECTED // 已采集（默认，公开热榜可见）
+  FEATURED  // 运营收录（热榜加权展示徽标）
+  DISCARDED // 运营丢弃（不再展示、不再合并新提及）
+}
+
+/// 采集来源（渠道）：支持启用/停用，key 与适配器一一对应
+model DemandSource {
+  key       String   @id // mock / v2ex / hn / reddit
+  name      String
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+/// 需求线索：同一痛点的多条外部提及聚合为一条
+model DemandClue {
+  id             String     @id @default(cuid())
+  title          String
+  summary        String     @db.Text
+  keywords       String[]   // 聚合匹配用关键词（标题指纹归一）
+  status         ClueStatus @default(COLLECTED)
+  mentionCount   Int        @default(0) // 提及总次数（冗余，与 ClueMention 同步）
+  mentionerCount Int        @default(0) // 提及人数（按来源+作者哈希去重）
+  firstSeenAt    DateTime   @default(now())
+  lastSeenAt     DateTime   @default(now())
+  reviewedBy     String?
+  reviewedAt     DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  mentions ClueMention[]
+
+  @@index([status, mentionerCount])
+  @@index([status, mentionCount])
+}
+
+/// 单条外部提及：只存公开内容与来源链接；作者仅存哈希，不落个人信息
+model ClueMention {
+  id          String     @id @default(cuid())
+  clueId      String
+  clue        DemandClue @relation(fields: [clueId], references: [id])
+  sourceKey   String
+  externalId  String // 来源侧唯一 ID，幂等去重
+  authorKey   String // sha256(sourceKey:authorId)，不可逆
+  url         String
+  excerpt     String     @db.Text // 已脱敏公开摘要（≤300 字）
+  mentionedAt DateTime
+  createdAt   DateTime   @default(now())
+
+  @@unique([sourceKey, externalId])
+  @@index([clueId])
+}
+
+/// 定时任务运行状态（节流用），key 如 clue-ingest
+model CronState {
+  key       String   @id
+  lastRunAt DateTime
+}
+
+/// 单轮采集候选缓冲区（F29 v0.8 小时聚合用）
+/// 单轮只做筛选并写入这里，每小时任务再把这 6 轮候选合并交模型做跨条聚类，最后统一入库
+model ClueCandidate {
+  id          String   @id @default(cuid())
+  sourceKey   String
+  externalId  String
+  title       String
+  excerpt     String   @db.Text
+  url         String
+  authorKey   String
+  mentionedAt DateTime
+  roundId     String // 采集轮次标识（YYYYMMDDHHmm）
+  fetchedAt   DateTime @default(now())
+  usedAt      DateTime? // 已被小时聚合消费的时间
+
+  @@unique([sourceKey, externalId])
+  @@index([fetchedAt])
+  @@index([usedAt])
+}
+
+/// 模型生成的检索词（F29 v0.8）：每小时生成一批，采集轮次轮换使用
+model ClueQuery {
+  id        String   @id @default(cuid())
+  query     String
+  origin    String   @default("llm") // fixed | llm
+  createdAt DateTime @default(now())
+
+  @@unique([query])
+  @@index([createdAt])
 }

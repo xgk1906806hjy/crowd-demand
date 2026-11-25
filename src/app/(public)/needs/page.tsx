@@ -57,7 +57,7 @@ export default async function NeedsPage({ searchParams }: { searchParams: Search
         <div>
           <h1 className="text-2xl font-bold">需求广场</h1>
           <p className="mt-1 text-sm text-slate-500">
-            票数决定需求是否进入承诺期，付费承诺金额决定开发优先级。
+            有偿悬赏、无偿求助、众筹三种方式并存。悬赏先托管再选方案，无偿由开发者自愿接单。
           </p>
         </div>
         <form action="/needs" className="flex items-center gap-2">

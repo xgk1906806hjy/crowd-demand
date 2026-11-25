@@ -5,7 +5,15 @@ import { createSmsGateway } from "@/infrastructure/sms/gateway";
 import { err, DomainError } from "@/domain/shared/result";
 import { toResponse } from "@/lib/api-response";
 
-const bodySchema = z.object({ phone: z.string().regex(/^1[3-9]\d{9}$/, "手机号格式不正确") });
+const bodySchema = z
+  .object({
+    phone: z.string().optional(),
+    email: z.string().optional(),
+    purpose: z.enum(["LOGIN", "BIND"]).optional(),
+  })
+  .refine((v) => Boolean(v.phone?.trim()) !== Boolean(v.email?.trim()), {
+    message: "请提供手机号或邮箱其中之一",
+  });
 
 export async function POST(req: NextRequest) {
   let json: unknown;
@@ -21,5 +29,5 @@ export async function POST(req: NextRequest) {
 
   const ip = req.headers.get("x-forwarded-for") ?? undefined;
   const service = new AuthService(createSmsGateway());
-  return toResponse(await service.requestCode({ phone: parsed.data.phone, ip }));
+  return toResponse(await service.requestCode({ ...parsed.data, ip }));
 }
